@@ -1,6 +1,6 @@
 #!/bin/bash
 # wl-longshot - Wayland scrolling screenshot utility
-# Copyright (C) 2024 Your Name
+# Copyright (C) 2024 Your Name 
 # Licensed under the GPLv3
 
 set -euo pipefail
