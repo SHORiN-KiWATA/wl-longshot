@@ -66,7 +66,6 @@ SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
 
-# Python 计算引擎路径
 if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
     STITCHER="/usr/share/$APP_NAME/stitcher.py"
 else
@@ -169,49 +168,54 @@ check_deps() {
     python3 -c "import cv2, numpy" &>/dev/null || die "missing python modules: opencv-python, numpy"
 }
 
-# --- UI 菜单 (图形环境/纯终端优雅降级) ---
+# --- UI 菜单 ---
 show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
     
-    if command -v wofi >/dev/null; then
-        echo -e "$content" | wofi -d -i -p "$prompt" --lines 4
-    elif command -v fuzzel >/dev/null; then
-        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: "
+    # 核心修复 1：挂载虚假缓存目录，彻底阻断 Fuzzel/Wofi 的历史记录记忆，强制维持原有排序
+    local dummy_cache="$CONFIG_DIR/dummy_cache"
+    mkdir -p "$dummy_cache"
+
+    if command -v fuzzel >/dev/null; then
+        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
-        echo -e "$content" | rofi -dmenu -p "$prompt"
+        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" rofi -dmenu -disable-history -p "$prompt" || true
+    elif command -v wofi >/dev/null; then
+        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" wofi -d -i -p "$prompt" --lines 4 || true
     elif [[ -t 0 ]]; then
-        # 终端纯文本模式：将提示信息推向 stderr，绝不污染返回值
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
-        
-        # 为了防止 select 陷入外壳捕获不到的死循环，我们限制尝试次数
-        PS3="> "
-        select opt in "${options[@]}"; do
-            if [[ -n "$opt" ]]; then
-                echo "$opt" # 唯一正确吐出的返回值
-                return
-            else
-                echo "Invalid input / 输入无效" >&2
-                echo ""
-                return
-            fi
+        local i=1
+        for opt in "${options[@]}"; do
+            echo "$i) $opt" >&2
+            i=$((i + 1))
         done
+        
+        local ans
+        read -r -p "> " ans || true
+        if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans > 0 && ans <= ${#options[@]} )); then
+            echo "${options[$((ans-1))]}"
+        fi
+        return 0
     else
         die "No GUI menu found and not running in an interactive terminal."
     fi
 }
 
 show_stop_menu() {
+    local dummy_cache="$CONFIG_DIR/dummy_cache"
+    mkdir -p "$dummy_cache"
+    
     if command -v fuzzel >/dev/null; then
-        echo "$STR_REC_STOP" | fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING "
+        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
     elif command -v wofi >/dev/null; then
-        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150
+        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 || true
     elif command -v rofi >/dev/null; then
-        echo "$STR_REC_STOP" | rofi -dmenu -p "$STR_RECORDING" -l 1
+        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" rofi -dmenu -disable-history -p "$STR_RECORDING" -l 1 || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $STR_RECORDING ===" >&2
-        read -r -p "Press [Enter] to $STR_REC_STOP: " _
+        read -r -p "Press [Enter] to $STR_REC_STOP: " _ || true
         echo "$STR_REC_STOP"
     else
         die "No GUI menu found and not running in an interactive terminal."
@@ -322,7 +326,12 @@ run_grim() {
         local choice
         choice=$(show_menu "$STR_CAP_NEXT\n$STR_FINISH\n$STR_ABORT" "$STR_GRIM_MODE")
         
-        # 核心修复：全面使用星号通配符进行模糊匹配，解决纯终端下的空格/标号干扰
+        # 如果用户按 Esc 取消菜单，我们当做正常 Finish 处理，不报错退出
+        if [[ -z "$choice" ]]; then
+            break
+        fi
+        
+        # 全面使用模糊匹配，无惧任何空格和序号干扰
         case "$choice" in
             *"$STR_CAP_NEXT"*)
                 sleep 0.2
@@ -341,12 +350,6 @@ run_grim() {
                 ;;
             *"$STR_FINISH"*) break ;;
             *"$STR_ABORT"*) exit 0 ;;
-            *) 
-                # 空输入或无效字符直接退出菜单，避免无限循环弹窗
-                if [[ -n "$choice" ]]; then
-                    exit 0
-                fi
-                ;;
         esac
     done
 
@@ -381,6 +384,8 @@ fi
 while true; do
     choice=$(show_menu "$STR_CAP_AREA\n$STR_SETTINGS\n$STR_QUIT" "$APP_NAME")
     
+    if [[ -z "$choice" ]]; then exit 0; fi
+
     case "$choice" in
         *"$STR_CAP_AREA"*)
             case "$backend" in
@@ -397,6 +402,8 @@ while true; do
                 
                 s_choice=$(show_menu "$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]" "$STR_SETTINGS")
                 
+                [[ -z "$s_choice" ]] && break
+
                 case "$s_choice" in
                     *"$STR_BACK"*) break ;;
                     
@@ -406,7 +413,7 @@ while true; do
                             *"wl-screenrec"*) set_conf "$FILE_BACKEND" "wl-screenrec" ;;
                             *"wf-recorder"*)  set_conf "$FILE_BACKEND" "wf-recorder" ;;
                             *"grim"*)         set_conf "$FILE_BACKEND" "grim" ;;
-                            *"$STR_BACK"*)    ;;
+                            *"$STR_BACK"*|"") ;;
                         esac
                         backend=$(get_conf "$FILE_BACKEND")
                         check_deps "$backend"
@@ -418,19 +425,12 @@ while true; do
                             *"$STR_ACT_PREV"*) set_conf "$FILE_ACTION" "preview" ;;
                             *"$STR_ACT_EDIT"*) set_conf "$FILE_ACTION" "edit" ;;
                             *"$STR_ACT_SAVE"*) set_conf "$FILE_ACTION" "save" ;;
-                            *"$STR_BACK"*)     ;;
+                            *"$STR_BACK"*|"")  ;;
                         esac
-                        ;;
-                        
-                    *) 
-                        if [[ -n "$s_choice" ]]; then exit 0; fi 
                         ;;
                 esac
             done
             ;;
         *"$STR_QUIT"*) exit 0 ;;
-        *) 
-            if [[ -n "$choice" ]]; then exit 0; fi 
-            ;;
     esac
 done
