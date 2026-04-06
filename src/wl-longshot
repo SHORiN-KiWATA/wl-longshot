@@ -1,5 +1,7 @@
 #!/bin/bash
 # wl-longshot - Wayland scrolling screenshot utility
+# Copyright (C) 2024 Your Name
+# Licensed under the GPLv3
 
 set -euo pipefail
 
@@ -64,6 +66,7 @@ SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
 
+# Python 计算引擎路径
 if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
     STITCHER="/usr/share/$APP_NAME/stitcher.py"
 else
@@ -84,7 +87,7 @@ cleanup() {
     if [[ -n "${WORKER_PID:-}" ]]; then 
         kill "$WORKER_PID" 2>/dev/null || true
     fi
-    if [[ -n "${GRIM_TMP_DIR:-}" ]]; then 
+    if [[ -n "${GRIM_TMP_DIR:-}" ]] && [[ -d "${GRIM_TMP_DIR:-}" ]]; then 
         rm -rf "$GRIM_TMP_DIR"
     fi
 }
@@ -166,7 +169,7 @@ check_deps() {
     python3 -c "import cv2, numpy" &>/dev/null || die "missing python modules: opencv-python, numpy"
 }
 
-# --- UI 菜单 ---
+# --- UI 菜单 (图形环境/纯终端优雅降级) ---
 show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
@@ -178,21 +181,24 @@ show_menu() {
     elif command -v rofi >/dev/null; then
         echo -e "$content" | rofi -dmenu -p "$prompt"
     elif [[ -t 0 ]]; then
+        # 终端纯文本模式：将提示信息推向 stderr，绝不污染返回值
         echo -e "\n=== $prompt ===" >&2
-        
         mapfile -t options <<< "$(echo -e "$content")"
         
+        # 为了防止 select 陷入外壳捕获不到的死循环，我们限制尝试次数
         PS3="> "
         select opt in "${options[@]}"; do
             if [[ -n "$opt" ]]; then
-                echo "$opt"
+                echo "$opt" # 唯一正确吐出的返回值
                 return
             else
-                echo "无效选择，请重新输入。" >&2
+                echo "Invalid input / 输入无效" >&2
+                echo ""
+                return
             fi
         done
     else
-        die "No GUI menu found (fuzzel/wofi/rofi) and not running in a terminal."
+        die "No GUI menu found and not running in an interactive terminal."
     fi
 }
 
@@ -208,11 +214,11 @@ show_stop_menu() {
         read -r -p "Press [Enter] to $STR_REC_STOP: " _
         echo "$STR_REC_STOP"
     else
-        die "No GUI menu found and not running in a terminal."
+        die "No GUI menu found and not running in an interactive terminal."
     fi
 }
 
-# --- 后处理 ---
+# --- 后处理 (使用 xdg-open) ---
 post_process() {
     local out_img="$1"
     [[ ! -f "$out_img" ]] && die "output image not found"
@@ -249,7 +255,8 @@ get_output_path() {
 # --- 录屏后端 ---
 run_video() {
     local backend="$1"
-    local out_img=$(get_output_path)
+    local out_img
+    out_img=$(get_output_path)
     
     local geo
     geo=$(slurp) || exit 0
@@ -268,7 +275,6 @@ run_video() {
     sleep 0.5
     kill -0 $pid 2>/dev/null || die "backend crashed: $backend"
 
-    # 调用紧凑版菜单
     show_stop_menu >/dev/null || true
     
     kill -SIGINT $pid || true
@@ -284,7 +290,8 @@ run_video() {
 
 # --- 截图后端 (Grim 异步) ---
 run_grim() {
-    local out_img=$(get_output_path)
+    local out_img
+    out_img=$(get_output_path)
     
     GRIM_TMP_DIR="/tmp/wl_longshot_$$"
     GRIM_FIFO="$GRIM_TMP_DIR/fifo"
@@ -315,8 +322,9 @@ run_grim() {
         local choice
         choice=$(show_menu "$STR_CAP_NEXT\n$STR_FINISH\n$STR_ABORT" "$STR_GRIM_MODE")
         
+        # 核心修复：全面使用星号通配符进行模糊匹配，解决纯终端下的空格/标号干扰
         case "$choice" in
-            "$STR_CAP_NEXT")
+            *"$STR_CAP_NEXT"*)
                 sleep 0.2
                 local next_geo
                 next_geo=$(slurp) || continue
@@ -329,11 +337,16 @@ run_grim() {
                 
                 echo "$next_img" >&3 2>/dev/null || true
                 
-                # 修复核心 BUG：使用安全递增替代会导致 set -e 触发崩溃的 ((idx++))
                 idx=$((idx + 1))
                 ;;
-            "$STR_FINISH") break ;;
-            "$STR_ABORT"|"") exit 0 ;;
+            *"$STR_FINISH"*) break ;;
+            *"$STR_ABORT"*) exit 0 ;;
+            *) 
+                # 空输入或无效字符直接退出菜单，避免无限循环弹窗
+                if [[ -n "$choice" ]]; then
+                    exit 0
+                fi
+                ;;
         esac
     done
 
@@ -369,14 +382,14 @@ while true; do
     choice=$(show_menu "$STR_CAP_AREA\n$STR_SETTINGS\n$STR_QUIT" "$APP_NAME")
     
     case "$choice" in
-        "$STR_CAP_AREA")
+        *"$STR_CAP_AREA"*)
             case "$backend" in
                 "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
                 "grim") run_grim ;;
             esac
             break
             ;;
-        "$STR_SETTINGS")
+        *"$STR_SETTINGS"*)
             while true; do
                 b_lbl=$(get_conf "$FILE_BACKEND" "wl-screenrec")
                 a_raw=$(get_conf "$FILE_ACTION" "preview")
@@ -385,32 +398,39 @@ while true; do
                 s_choice=$(show_menu "$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]" "$STR_SETTINGS")
                 
                 case "$s_choice" in
-                    "$STR_BACK"|"") break ;;
+                    *"$STR_BACK"*) break ;;
                     
-                    "$STR_BACKEND "*)
-                        # --- 后端选择子菜单 ---
+                    *"$STR_BACKEND "*)
                         b_choice=$(show_menu "$STR_BACK\nwl-screenrec\nwf-recorder\ngrim" "$STR_BACKEND")
                         case "$b_choice" in
-                            "wl-screenrec"|"wf-recorder"|"grim")
-                                set_conf "$FILE_BACKEND" "$b_choice"
-                                backend="$b_choice"
-                                check_deps "$backend"
-                                ;;
+                            *"wl-screenrec"*) set_conf "$FILE_BACKEND" "wl-screenrec" ;;
+                            *"wf-recorder"*)  set_conf "$FILE_BACKEND" "wf-recorder" ;;
+                            *"grim"*)         set_conf "$FILE_BACKEND" "grim" ;;
+                            *"$STR_BACK"*)    ;;
+                        esac
+                        backend=$(get_conf "$FILE_BACKEND")
+                        check_deps "$backend"
+                        ;;
+                        
+                    *"$STR_ACTION "*)
+                        a_choice=$(show_menu "$STR_BACK\n$STR_ACT_PREV\n$STR_ACT_EDIT\n$STR_ACT_SAVE" "$STR_ACTION")
+                        case "$a_choice" in
+                            *"$STR_ACT_PREV"*) set_conf "$FILE_ACTION" "preview" ;;
+                            *"$STR_ACT_EDIT"*) set_conf "$FILE_ACTION" "edit" ;;
+                            *"$STR_ACT_SAVE"*) set_conf "$FILE_ACTION" "save" ;;
+                            *"$STR_BACK"*)     ;;
                         esac
                         ;;
                         
-                    "$STR_ACTION "*)
-                        # --- 动作选择子菜单 ---
-                        a_choice=$(show_menu "$STR_BACK\n$STR_ACT_PREV\n$STR_ACT_EDIT\n$STR_ACT_SAVE" "$STR_ACTION")
-                        case "$a_choice" in
-                            "$STR_ACT_PREV") set_conf "$FILE_ACTION" "preview" ;;
-                            "$STR_ACT_EDIT") set_conf "$FILE_ACTION" "edit" ;;
-                            "$STR_ACT_SAVE") set_conf "$FILE_ACTION" "save" ;;
-                        esac
+                    *) 
+                        if [[ -n "$s_choice" ]]; then exit 0; fi 
                         ;;
                 esac
             done
             ;;
-        "$STR_QUIT"|"") exit 0 ;;
+        *"$STR_QUIT"*) exit 0 ;;
+        *) 
+            if [[ -n "$choice" ]]; then exit 0; fi 
+            ;;
     esac
 done
