@@ -173,16 +173,14 @@ show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
     
-    # 核心修复 1：挂载虚假缓存目录，彻底阻断 Fuzzel/Wofi 的历史记录记忆，强制维持原有排序
-    local dummy_cache="$CONFIG_DIR/dummy_cache"
-    mkdir -p "$dummy_cache"
-
+    # 彻底禁用 UI 工具的历史记忆排序，强制严格遵守传入的字符串顺序
     if command -v fuzzel >/dev/null; then
-        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
+        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
-        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" rofi -dmenu -disable-history -p "$prompt" || true
+        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
     elif command -v wofi >/dev/null; then
-        echo -e "$content" | env XDG_CACHE_HOME="$dummy_cache" wofi -d -i -p "$prompt" --lines 4 || true
+        echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
+
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
@@ -204,15 +202,12 @@ show_menu() {
 }
 
 show_stop_menu() {
-    local dummy_cache="$CONFIG_DIR/dummy_cache"
-    mkdir -p "$dummy_cache"
-    
     if command -v fuzzel >/dev/null; then
-        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
+        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="/tmp" fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
     elif command -v wofi >/dev/null; then
-        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 || true
+        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 --cache-file /dev/null || true
     elif command -v rofi >/dev/null; then
-        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="$dummy_cache" rofi -dmenu -disable-history -p "$STR_RECORDING" -l 1 || true
+        echo "$STR_REC_STOP" | rofi -dmenu -disable-history -p "$STR_RECORDING" -l 1 || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $STR_RECORDING ===" >&2
         read -r -p "Press [Enter] to $STR_REC_STOP: " _ || true
