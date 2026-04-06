@@ -1,6 +1,6 @@
 # wl-longshot
 
-## [中文版](README-CN) | [ENGLISH](README)
+## [中文版](README-CN.md) | [ENGLISH](README.md)
 
 A simple scrolling screenshot tool for Wayland Compositors. 
 
