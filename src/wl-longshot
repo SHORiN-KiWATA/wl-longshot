@@ -386,20 +386,26 @@ while true; do
                 
                 case "$s_choice" in
                     "$STR_BACK"|"") break ;;
+                    
                     "$STR_BACKEND "*)
-                        case "$b_lbl" in
-                            "wl-screenrec") set_conf "$FILE_BACKEND" "wf-recorder" ;;
-                            "wf-recorder")  set_conf "$FILE_BACKEND" "grim" ;;
-                            "grim")         set_conf "$FILE_BACKEND" "wl-screenrec" ;;
+                        # --- 后端选择子菜单 ---
+                        b_choice=$(show_menu "$STR_BACK\nwl-screenrec\nwf-recorder\ngrim" "$STR_BACKEND")
+                        case "$b_choice" in
+                            "wl-screenrec"|"wf-recorder"|"grim")
+                                set_conf "$FILE_BACKEND" "$b_choice"
+                                backend="$b_choice"
+                                check_deps "$backend"
+                                ;;
                         esac
-                        backend=$(get_conf "$FILE_BACKEND")
-                        check_deps "$backend"
                         ;;
+                        
                     "$STR_ACTION "*)
-                        case "$a_raw" in
-                            "preview") set_conf "$FILE_ACTION" "edit" ;;
-                            "edit")    set_conf "$FILE_ACTION" "save" ;;
-                            "save")    set_conf "$FILE_ACTION" "preview" ;;
+                        # --- 动作选择子菜单 ---
+                        a_choice=$(show_menu "$STR_BACK\n$STR_ACT_PREV\n$STR_ACT_EDIT\n$STR_ACT_SAVE" "$STR_ACTION")
+                        case "$a_choice" in
+                            "$STR_ACT_PREV") set_conf "$FILE_ACTION" "preview" ;;
+                            "$STR_ACT_EDIT") set_conf "$FILE_ACTION" "edit" ;;
+                            "$STR_ACT_SAVE") set_conf "$FILE_ACTION" "save" ;;
                         esac
                         ;;
                 esac
