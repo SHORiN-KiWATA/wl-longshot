@@ -2,7 +2,7 @@
 
 ## [中文版](README-CN) | [English](README)
 
-一个适用于 Wayland 合成器（Compositors）的简单长截图（滚动截图）工具。
+一个适用于 Wayland 合成器的简单长截图工具。
 
 ## 功能特性
 
@@ -47,3 +47,10 @@
 - `satty` （用于编辑图像）
 - `xdg-utils` （用于通过 `xdg-open` 预览图像）
 - `wl-screenrec` 或 `wf-recorder` （用于流式录制）
+
+## 致谢
+
+
+- [snemc](https://github.com/jswysnemc) 提供基于录屏的长截图实现的灵感
+- [SHORiN-KiWATA](https://github.com/SHORiN-KiWATA) 设计具体的实现方法和功能
+- [Google Gemini](https://gemini.google.com/) 完成主要的逻辑判断和代码
