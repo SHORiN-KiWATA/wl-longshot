@@ -1,0 +1,291 @@
+#!/bin/bash
+# wl-longshot - Wayland scrolling screenshot utility
+
+set -euo pipefail
+
+APP_NAME="wl-longshot"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
+SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
+
+FILE_BACKEND="$CONFIG_DIR/backend"
+FILE_ACTION="$CONFIG_DIR/action"
+
+if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
+    STITCHER="/usr/share/$APP_NAME/stitcher.py"
+else
+    STITCHER="$(dirname "${BASH_SOURCE[0]}")/stitcher.py"
+fi
+
+mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
+
+die() { echo "error: $1" >&2; exit 1; }
+notify() { command -v notify-send >/dev/null && notify-send -a "$APP_NAME" "$1" "$2"; }
+get_conf() { cat "$1" 2>/dev/null || echo "$2"; }
+set_conf() { echo "$2" > "$1"; }
+
+# --- 帮助文档 ---
+show_help() {
+    cat << EOF
+Usage: $APP_NAME [OPTIONS]
+
+A smart scrolling screenshot tool for Wayland compositors.
+
+Options:
+  -o, --output FILE   Specify the output file path (bypasses main menu)
+  -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)
+  -h, --help          Show this help message and exit
+
+If no options are provided, an interactive menu will be launched.
+EOF
+}
+
+# --- CLI 参数解析 ---
+OUT_FILE=""
+FORCE_BACKEND=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -o|--output)
+            OUT_FILE="$2"
+            shift 2
+            ;;
+        -b|--backend)
+            FORCE_BACKEND="$2"
+            shift 2
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        *)
+            die "Unknown option: $1"
+            ;;
+    esac
+done
+
+# 如果指定了相对路径，转换为绝对路径以防终端切换目录导致问题
+if [[ -n "$OUT_FILE" ]]; then
+    OUT_FILE="$(realpath -m "$OUT_FILE")"
+    mkdir -p "$(dirname "$OUT_FILE")"
+fi
+
+# --- 依赖检查 ---
+check_deps() {
+    local backend="$1"
+    local deps=("slurp" "wl-copy" "python3")
+    
+    if [[ "$backend" == "grim" ]]; then
+        deps+=("grim")
+    else
+        deps+=("$backend")
+    fi
+
+    for dep in "${deps[@]}"; do
+        command -v "$dep" >/dev/null || die "missing dependency: $dep"
+    done
+    python3 -c "import cv2, numpy" &>/dev/null || die "missing python modules: opencv-python, numpy"
+}
+
+# --- UI 菜单 ---
+show_menu() {
+    local content="$1"
+    local prompt="${2:-$APP_NAME}"
+    if command -v wofi >/dev/null; then
+        echo -e "$content" | wofi -d -i -p "$prompt" --lines 4
+    elif command -v fuzzel >/dev/null; then
+        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: "
+    elif command -v rofi >/dev/null; then
+        echo -e "$content" | rofi -dmenu -p "$prompt"
+    else
+        die "no supported menu application found (wofi/fuzzel/rofi)"
+    fi
+}
+
+# --- 后处理 (使用 xdg-open) ---
+post_process() {
+    local out_img="$1"
+    [[ ! -f "$out_img" ]] && die "output image not found"
+    
+    wl-copy < "$out_img"
+    notify "Success" "Saved to $(basename "$out_img")"
+    
+    local action=$(get_conf "$FILE_ACTION" "preview")
+    case "$action" in
+        "preview") 
+            # 优雅降级：优先使用 xdg-open，如果没有则尝试 imv
+            if command -v xdg-open >/dev/null; then
+                xdg-open "$out_img" &>/dev/null &
+            elif command -v imv >/dev/null; then
+                imv "$out_img"
+            fi
+            ;;
+        "edit")    
+            command -v satty >/dev/null && satty -f "$out_img" 
+            ;;
+        "save")    
+            ;;
+    esac
+}
+
+# --- 确定输出路径 ---
+get_output_path() {
+    if [[ -n "$OUT_FILE" ]]; then
+        echo "$OUT_FILE"
+    else
+        echo "$SAVE_DIR/longshot_$(date +%Y%m%d_%H%M%S).png"
+    fi
+}
+
+# --- 录屏后端 (wl-screenrec / wf-recorder) ---
+run_video() {
+    local backend="$1"
+    local out_img=$(get_output_path)
+    
+    local geo
+    geo=$(slurp) || exit 0
+    [[ -z "$geo" ]] && exit 0
+
+    local tmp_vid="/tmp/wl_longshot_$$.mp4"
+    local pid
+
+    if [[ "$backend" == "wl-screenrec" ]]; then
+        wl-screenrec -g "$geo" -f "$tmp_vid" &>/dev/null &
+    else
+        wf-recorder -g "$geo" -f "$tmp_vid" -c libx264 -p crf=0 -p preset=ultrafast -p pixel_format=yuv420p &>/dev/null &
+    fi
+    pid=$!
+
+    sleep 0.5
+    kill -0 $pid 2>/dev/null || die "backend crashed: $backend"
+
+    show_menu "Stop" "Recording..." >/dev/null || true
+    kill -SIGINT $pid || true
+    wait $pid 2>/dev/null || true
+
+    if [[ -f "$tmp_vid" ]]; then
+        notify "Processing" "Stitching video frames..."
+        python3 "$STITCHER" video --in "$tmp_vid" --out "$out_img"
+        rm -f "$tmp_vid"
+        post_process "$out_img"
+    fi
+}
+
+# --- 截图后端 (grim 异步) ---
+run_grim() {
+    local out_img=$(get_output_path)
+    local tmp_dir="/tmp/wl_longshot_$$"
+    local base_img="$tmp_dir/base.png"
+    local fifo="$tmp_dir/fifo"
+    
+    mkdir -p "$tmp_dir"
+    trap 'echo "DONE" >"$fifo" 2>/dev/null || true; kill $(jobs -p) 2>/dev/null || true; rm -rf "$tmp_dir"' EXIT
+
+    local geo
+    geo=$(slurp) || exit 0
+    [[ -z "$geo" ]] && exit 0
+    
+    IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
+    grim -g "$geo" "$base_img"
+
+    mkfifo "$fifo"
+    exec 3<> "$fifo"
+
+    (
+        while read -r task <&3; do
+            [[ "$task" == "DONE" ]] && break
+            python3 "$STITCHER" incremental --base "$base_img" --next "$task" --out "$base_img"
+        done
+    ) &
+    local worker_pid=$!
+
+    local idx=0
+    while true; do
+        local choice
+        choice=$(show_menu "Capture Next\nFinish\nAbort" "Grim Mode")
+        
+        case "$choice" in
+            "Capture Next")
+                sleep 0.2
+                local next_geo
+                next_geo=$(slurp) || continue
+                [[ -z "$next_geo" ]] && continue
+                
+                IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
+                local final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
+                local next_img="$tmp_dir/next_$idx.png"
+                grim -g "$final_geo" "$next_img"
+                
+                echo "$next_img" >&3
+                ((idx++))
+                ;;
+            "Finish") break ;;
+            "Abort"|"") exit 0 ;;
+        esac
+    done
+
+    echo "DONE" >&3
+    wait $worker_pid
+    exec 3>&-
+
+    if [[ -f "$base_img" ]]; then
+        mv "$base_img" "$out_img"
+        post_process "$out_img"
+    fi
+}
+
+# --- 启动逻辑判定 ---
+backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "wl-screenrec")}"
+check_deps "$backend"
+
+# 如果指定了 -o 输出文件 或 -b 强制后端，则直接跳过主菜单进入截图流程
+if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
+    case "$backend" in
+        "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
+        "grim") run_grim ;;
+        *) die "invalid backend: $backend" ;;
+    esac
+    exit 0
+fi
+
+# 否则进入正常的交互式菜单
+while true; do
+    choice=$(show_menu "Capture Area\nSettings\nQuit" "$APP_NAME")
+    
+    case "$choice" in
+        "Capture Area")
+            case "$backend" in
+                "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
+                "grim") run_grim ;;
+            esac
+            break
+            ;;
+        "Settings")
+            while true; do
+                b_lbl=$(get_conf "$FILE_BACKEND" "wl-screenrec")
+                a_lbl=$(get_conf "$FILE_ACTION" "preview")
+                s_choice=$(show_menu "Back\nBackend [$b_lbl]\nAction [$a_lbl]" "Settings")
+                
+                case "$s_choice" in
+                    "Back"|"") break ;;
+                    "Backend "*)
+                        case "$b_lbl" in
+                            "wl-screenrec") set_conf "$FILE_BACKEND" "wf-recorder" ;;
+                            "wf-recorder")  set_conf "$FILE_BACKEND" "grim" ;;
+                            "grim")         set_conf "$FILE_BACKEND" "wl-screenrec" ;;
+                        esac
+                        backend=$(get_conf "$FILE_BACKEND")
+                        check_deps "$backend"
+                        ;;
+                    "Action "*)
+                        case "$a_lbl" in
+                            "preview") set_conf "$FILE_ACTION" "edit" ;;
+                            "edit")    set_conf "$FILE_ACTION" "save" ;;
+                            "save")    set_conf "$FILE_ACTION" "preview" ;;
+                        esac
+                        ;;
+                esac
+            done
+            ;;
+        "Quit"|"") exit 0 ;;
+    esac
+done
