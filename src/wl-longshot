@@ -134,12 +134,14 @@ A smart scrolling screenshot tool for Wayland compositors.
 Options:
   -o, --output FILE   Specify the output file path (bypasses main menu)
   -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)
+  -m, --menu CMD      Override the default dmenu-like application (e.g. "fuzzel -d")
   -h, --help          Show this help message and exit
 EOF
 }
 
 OUT_FILE=""
 FORCE_BACKEND=""
+CUSTOM_MENU=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -151,6 +153,11 @@ while [[ $# -gt 0 ]]; do
         -b|--backend)
             if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
             FORCE_BACKEND="$2"
+            shift 2
+            ;;
+        -m|--menu)
+            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
+            CUSTOM_MENU="$2"
             shift 2
             ;;
         -h|--help)
@@ -190,14 +197,19 @@ show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
     
-    # 彻底禁用 UI 工具的历史记忆排序，强制严格遵守传入的字符串顺序
-    if command -v fuzzel >/dev/null; then
-        # fuzzel 没有禁用缓存的参数，将其指向系统的 tmp 内存盘以避免污染
+    # 1. 如果用户自定义了菜单命令，优先使用 (假设工具支持 -p 传递提示词，符合 dmenu 标准)
+    if [[ -n "${CUSTOM_MENU:-}" ]]; then
+        echo -e "$content" | eval "$CUSTOM_MENU -p '$prompt: '" || true
+    
+    # 2. 默认后备工具链：Fuzzel -> Rofi -> Wofi
+    elif command -v fuzzel >/dev/null; then
         echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
-        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt"  || true
+        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
     elif command -v wofi >/dev/null; then
         echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
+    
+    # 3. 纯终端文字交互兜底
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
@@ -219,12 +231,14 @@ show_menu() {
 }
 
 show_stop_menu() {
-    if command -v fuzzel >/dev/null; then
-        echo "$STR_REC_STOP" | env XDG_CACHE_HOME="/tmp" fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
-    elif command -v wofi >/dev/null; then
-        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 --cache-file /dev/null || true
+    if [[ -n "${CUSTOM_MENU:-}" ]]; then
+        echo "$STR_REC_STOP" | eval "$CUSTOM_MENU -p '$STR_RECORDING '" || true
+    elif command -v fuzzel >/dev/null; then
+        echo "$STR_REC_STOP" | fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
     elif command -v rofi >/dev/null; then
         echo "$STR_REC_STOP" | rofi -dmenu -disable-history -p "$STR_RECORDING" -l 1 || true
+    elif command -v wofi >/dev/null; then
+        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 --cache-file /dev/null || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $STR_RECORDING ===" >&2
         read -r -p "Press [Enter] to $STR_REC_STOP: " _ || true
@@ -348,12 +362,9 @@ run_grim() {
                 sleep 0.2
                 local final_geo
                 
-                # 核心功能：自动/手动分支判断
                 if [[ "$gmode" == "auto" ]]; then
-                    # 自动模式：直接使用第一张图的完美坐标
                     final_geo="$geo"
                 else
-                    # 手动模式：继续画框
                     local next_geo
                     next_geo=$(slurp) || continue
                     [[ -z "$next_geo" ]] && continue
@@ -420,7 +431,6 @@ while true; do
                 a_raw=$(get_conf "$FILE_ACTION" "preview")
                 a_lbl=$(get_action_disp "$a_raw")
                 
-                # 动态生成菜单，只有 grim 后端才显示“截图方式”
                 menu_content="$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]"
                 
                 if [[ "$b_lbl" == "grim" ]]; then
@@ -441,6 +451,7 @@ while true; do
                             *"wl-screenrec"*) set_conf "$FILE_BACKEND" "wl-screenrec" ;;
                             *"wf-recorder"*)  set_conf "$FILE_BACKEND" "wf-recorder" ;;
                             *"grim"*)         set_conf "$FILE_BACKEND" "grim" ;;
+                            *"$STR_BACK"*|"") ;;
                         esac
                         backend=$(get_conf "$FILE_BACKEND")
                         check_deps "$backend"
@@ -452,15 +463,17 @@ while true; do
                             *"$STR_ACT_PREV"*) set_conf "$FILE_ACTION" "preview" ;;
                             *"$STR_ACT_EDIT"*) set_conf "$FILE_ACTION" "edit" ;;
                             *"$STR_ACT_SAVE"*) set_conf "$FILE_ACTION" "save" ;;
+                            *"$STR_BACK"*|"")  ;;
                         esac
                         ;;
                         
                     *"$STR_GMODE_LBL "*)
-                        g_choice=$(show_menu "$STR_BACK\n$STR_GM_MANUAL\n$STR_GM_AUTO" "$STR_GMODE_LBL")
-                        case "$g_choice" in
-                            *"$STR_GM_MANUAL"*) set_conf "$FILE_GRIM_MODE" "manual" ;;
-                            *"$STR_GM_AUTO"*)   set_conf "$FILE_GRIM_MODE" "auto" ;;
-                        esac
+                        # 核心修改：点击截图方式直接反转配置，取消子菜单
+                        if [[ "$(get_conf "$FILE_GRIM_MODE" "manual")" == "manual" ]]; then
+                            set_conf "$FILE_GRIM_MODE" "auto"
+                        else
+                            set_conf "$FILE_GRIM_MODE" "manual"
+                        fi
                         ;;
                 esac
             done
