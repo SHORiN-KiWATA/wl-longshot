@@ -3,6 +3,60 @@
 
 set -euo pipefail
 
+# --- i18n 国际化支持 ---
+if echo "${LANG:-}" | grep -iq "zh"; then
+    STR_CAP_AREA="截取区域"
+    STR_SETTINGS="设置"
+    STR_QUIT="退出"
+    
+    STR_BACK="返回"
+    STR_BACKEND="后端"
+    STR_ACTION="动作"
+    
+    STR_ACT_PREV="预览"
+    STR_ACT_EDIT="编辑"
+    STR_ACT_SAVE="仅保存"
+    
+    STR_REC_STOP="停止"
+    STR_RECORDING="录制中..."
+    
+    STR_GRIM_MODE="Grim 模式"
+    STR_CAP_NEXT="截取下一张"
+    STR_FINISH="完成"
+    STR_ABORT="放弃"
+    
+    STR_NOTIFY_PROC="处理中"
+    STR_NOTIFY_STITCH="正在拼接视频帧..."
+    STR_NOTIFY_SUCC="成功"
+    STR_NOTIFY_SAVED="已保存至"
+else
+    STR_CAP_AREA="Capture Area"
+    STR_SETTINGS="Settings"
+    STR_QUIT="Quit"
+    
+    STR_BACK="Back"
+    STR_BACKEND="Backend"
+    STR_ACTION="Action"
+    
+    STR_ACT_PREV="Preview"
+    STR_ACT_EDIT="Edit"
+    STR_ACT_SAVE="Save Only"
+    
+    STR_REC_STOP="Stop"
+    STR_RECORDING="Recording..."
+    
+    STR_GRIM_MODE="Grim Mode"
+    STR_CAP_NEXT="Capture Next"
+    STR_FINISH="Finish"
+    STR_ABORT="Abort"
+    
+    STR_NOTIFY_PROC="Processing"
+    STR_NOTIFY_STITCH="Stitching video frames..."
+    STR_NOTIFY_SUCC="Success"
+    STR_NOTIFY_SAVED="Saved to"
+fi
+
+# --- Constants & Paths ---
 APP_NAME="wl-longshot"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
 SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
@@ -18,12 +72,40 @@ fi
 
 mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 
+# --- 全局安全清理机制 (修复变量未绑定 Bug) ---
+GRIM_TMP_DIR=""
+GRIM_FIFO=""
+WORKER_PID=""
+
+cleanup() {
+    if [[ -n "${GRIM_FIFO:-}" ]]; then 
+        echo "DONE" >"$GRIM_FIFO" 2>/dev/null || true
+    fi
+    if [[ -n "${WORKER_PID:-}" ]]; then 
+        kill "$WORKER_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${GRIM_TMP_DIR:-}" ]]; then 
+        rm -rf "$GRIM_TMP_DIR"
+    fi
+}
+trap cleanup EXIT SIGINT SIGTERM
+
+# --- Utils ---
 die() { echo "error: $1" >&2; exit 1; }
 notify() { command -v notify-send >/dev/null && notify-send -a "$APP_NAME" "$1" "$2"; }
 get_conf() { cat "$1" 2>/dev/null || echo "$2"; }
 set_conf() { echo "$2" > "$1"; }
 
-# --- 帮助文档 ---
+get_action_disp() {
+    case "$1" in
+        "preview") echo "$STR_ACT_PREV" ;;
+        "edit") echo "$STR_ACT_EDIT" ;;
+        "save") echo "$STR_ACT_SAVE" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# --- CLI 参数解析 ---
 show_help() {
     cat << EOF
 Usage: $APP_NAME [OPTIONS]
@@ -34,22 +116,21 @@ Options:
   -o, --output FILE   Specify the output file path (bypasses main menu)
   -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)
   -h, --help          Show this help message and exit
-
-If no options are provided, an interactive menu will be launched.
 EOF
 }
 
-# --- CLI 参数解析 ---
 OUT_FILE=""
 FORCE_BACKEND=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -o|--output)
+            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
             OUT_FILE="$2"
             shift 2
             ;;
         -b|--backend)
+            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
             FORCE_BACKEND="$2"
             shift 2
             ;;
@@ -63,7 +144,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 如果指定了相对路径，转换为绝对路径以防终端切换目录导致问题
 if [[ -n "$OUT_FILE" ]]; then
     OUT_FILE="$(realpath -m "$OUT_FILE")"
     mkdir -p "$(dirname "$OUT_FILE")"
@@ -107,12 +187,12 @@ post_process() {
     [[ ! -f "$out_img" ]] && die "output image not found"
     
     wl-copy < "$out_img"
-    notify "Success" "Saved to $(basename "$out_img")"
+    notify "$STR_NOTIFY_SUCC" "$STR_NOTIFY_SAVED $(basename "$out_img")"
     
-    local action=$(get_conf "$FILE_ACTION" "preview")
+    local action
+    action=$(get_conf "$FILE_ACTION" "preview")
     case "$action" in
         "preview") 
-            # 优雅降级：优先使用 xdg-open，如果没有则尝试 imv
             if command -v xdg-open >/dev/null; then
                 xdg-open "$out_img" &>/dev/null &
             elif command -v imv >/dev/null; then
@@ -127,7 +207,6 @@ post_process() {
     esac
 }
 
-# --- 确定输出路径 ---
 get_output_path() {
     if [[ -n "$OUT_FILE" ]]; then
         echo "$OUT_FILE"
@@ -136,7 +215,7 @@ get_output_path() {
     fi
 }
 
-# --- 录屏后端 (wl-screenrec / wf-recorder) ---
+# --- 录屏后端 ---
 run_video() {
     local backend="$1"
     local out_img=$(get_output_path)
@@ -158,27 +237,28 @@ run_video() {
     sleep 0.5
     kill -0 $pid 2>/dev/null || die "backend crashed: $backend"
 
-    show_menu "Stop" "Recording..." >/dev/null || true
+    show_menu "$STR_REC_STOP" "$STR_RECORDING" >/dev/null || true
     kill -SIGINT $pid || true
     wait $pid 2>/dev/null || true
 
     if [[ -f "$tmp_vid" ]]; then
-        notify "Processing" "Stitching video frames..."
+        notify "$STR_NOTIFY_PROC" "$STR_NOTIFY_STITCH"
         python3 "$STITCHER" video --in "$tmp_vid" --out "$out_img"
         rm -f "$tmp_vid"
         post_process "$out_img"
     fi
 }
 
-# --- 截图后端 (grim 异步) ---
+# --- 截图后端 (Grim 异步) ---
 run_grim() {
     local out_img=$(get_output_path)
-    local tmp_dir="/tmp/wl_longshot_$$"
-    local base_img="$tmp_dir/base.png"
-    local fifo="$tmp_dir/fifo"
     
-    mkdir -p "$tmp_dir"
-    trap 'echo "DONE" >"$fifo" 2>/dev/null || true; kill $(jobs -p) 2>/dev/null || true; rm -rf "$tmp_dir"' EXIT
+    # 赋值给全局清理变量
+    GRIM_TMP_DIR="/tmp/wl_longshot_$$"
+    GRIM_FIFO="$GRIM_TMP_DIR/fifo"
+    local base_img="$GRIM_TMP_DIR/base.png"
+    
+    mkdir -p "$GRIM_TMP_DIR"
 
     local geo
     geo=$(slurp) || exit 0
@@ -187,8 +267,8 @@ run_grim() {
     IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
     grim -g "$geo" "$base_img"
 
-    mkfifo "$fifo"
-    exec 3<> "$fifo"
+    mkfifo "$GRIM_FIFO"
+    exec 3<> "$GRIM_FIFO"
 
     (
         while read -r task <&3; do
@@ -196,15 +276,15 @@ run_grim() {
             python3 "$STITCHER" incremental --base "$base_img" --next "$task" --out "$base_img"
         done
     ) &
-    local worker_pid=$!
+    WORKER_PID=$!
 
     local idx=0
     while true; do
         local choice
-        choice=$(show_menu "Capture Next\nFinish\nAbort" "Grim Mode")
+        choice=$(show_menu "$STR_CAP_NEXT\n$STR_FINISH\n$STR_ABORT" "$STR_GRIM_MODE")
         
         case "$choice" in
-            "Capture Next")
+            "$STR_CAP_NEXT")
                 sleep 0.2
                 local next_geo
                 next_geo=$(slurp) || continue
@@ -212,32 +292,38 @@ run_grim() {
                 
                 IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
                 local final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
-                local next_img="$tmp_dir/next_$idx.png"
+                local next_img="$GRIM_TMP_DIR/next_$idx.png"
                 grim -g "$final_geo" "$next_img"
                 
                 echo "$next_img" >&3
                 ((idx++))
                 ;;
-            "Finish") break ;;
-            "Abort"|"") exit 0 ;;
+            "$STR_FINISH") break ;;
+            "$STR_ABORT"|"") exit 0 ;;
         esac
     done
 
+    # 正常结束，优雅关闭 Worker
     echo "DONE" >&3
-    wait $worker_pid
+    wait "$WORKER_PID" 2>/dev/null || true
     exec 3>&-
 
     if [[ -f "$base_img" ]]; then
         mv "$base_img" "$out_img"
         post_process "$out_img"
     fi
+
+    # 清空状态
+    rm -rf "$GRIM_TMP_DIR"
+    GRIM_TMP_DIR=""
+    GRIM_FIFO=""
+    WORKER_PID=""
 }
 
-# --- 启动逻辑判定 ---
+# --- 启动逻辑 ---
 backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "wl-screenrec")}"
 check_deps "$backend"
 
-# 如果指定了 -o 输出文件 或 -b 强制后端，则直接跳过主菜单进入截图流程
 if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
     case "$backend" in
         "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
@@ -247,27 +333,28 @@ if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
     exit 0
 fi
 
-# 否则进入正常的交互式菜单
 while true; do
-    choice=$(show_menu "Capture Area\nSettings\nQuit" "$APP_NAME")
+    choice=$(show_menu "$STR_CAP_AREA\n$STR_SETTINGS\n$STR_QUIT" "$APP_NAME")
     
     case "$choice" in
-        "Capture Area")
+        "$STR_CAP_AREA")
             case "$backend" in
                 "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
                 "grim") run_grim ;;
             esac
             break
             ;;
-        "Settings")
+        "$STR_SETTINGS")
             while true; do
                 b_lbl=$(get_conf "$FILE_BACKEND" "wl-screenrec")
-                a_lbl=$(get_conf "$FILE_ACTION" "preview")
-                s_choice=$(show_menu "Back\nBackend [$b_lbl]\nAction [$a_lbl]" "Settings")
+                a_raw=$(get_conf "$FILE_ACTION" "preview")
+                a_lbl=$(get_action_disp "$a_raw")
+                
+                s_choice=$(show_menu "$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]" "$STR_SETTINGS")
                 
                 case "$s_choice" in
-                    "Back"|"") break ;;
-                    "Backend "*)
+                    "$STR_BACK"|"") break ;;
+                    "$STR_BACKEND "*)
                         case "$b_lbl" in
                             "wl-screenrec") set_conf "$FILE_BACKEND" "wf-recorder" ;;
                             "wf-recorder")  set_conf "$FILE_BACKEND" "grim" ;;
@@ -276,8 +363,8 @@ while true; do
                         backend=$(get_conf "$FILE_BACKEND")
                         check_deps "$backend"
                         ;;
-                    "Action "*)
-                        case "$a_lbl" in
+                    "$STR_ACTION "*)
+                        case "$a_raw" in
                             "preview") set_conf "$FILE_ACTION" "edit" ;;
                             "edit")    set_conf "$FILE_ACTION" "save" ;;
                             "save")    set_conf "$FILE_ACTION" "preview" ;;
@@ -286,6 +373,6 @@ while true; do
                 esac
             done
             ;;
-        "Quit"|"") exit 0 ;;
+        "$STR_QUIT"|"") exit 0 ;;
     esac
 done
