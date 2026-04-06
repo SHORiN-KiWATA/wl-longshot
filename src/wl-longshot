@@ -195,10 +195,9 @@ show_menu() {
         # fuzzel 没有禁用缓存的参数，将其指向系统的 tmp 内存盘以避免污染
         echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
-        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt"
+        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt"  || true
     elif command -v wofi >/dev/null; then
         echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
- || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
