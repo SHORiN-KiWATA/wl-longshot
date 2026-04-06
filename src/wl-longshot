@@ -31,6 +31,10 @@ if echo "${LANG:-}" | grep -iq "zh"; then
     STR_NOTIFY_STITCH="正在拼接视频帧..."
     STR_NOTIFY_SUCC="成功"
     STR_NOTIFY_SAVED="已保存至"
+    
+    STR_GMODE_LBL="截图方式"
+    STR_GM_MANUAL="手动框选"
+    STR_GM_AUTO="自动等高"
 else
     STR_CAP_AREA="Capture Area"
     STR_SETTINGS="Settings"
@@ -56,6 +60,10 @@ else
     STR_NOTIFY_STITCH="Stitching video frames..."
     STR_NOTIFY_SUCC="Success"
     STR_NOTIFY_SAVED="Saved to"
+    
+    STR_GMODE_LBL="Capture Mode"
+    STR_GM_MANUAL="Manual"
+    STR_GM_AUTO="Auto Fixed"
 fi
 
 # --- Constants & Paths ---
@@ -65,6 +73,7 @@ SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
 
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
+FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
 
 if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
     STITCHER="/usr/share/$APP_NAME/stitcher.py"
@@ -103,6 +112,14 @@ get_action_disp() {
         "preview") echo "$STR_ACT_PREV" ;;
         "edit") echo "$STR_ACT_EDIT" ;;
         "save") echo "$STR_ACT_SAVE" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+get_gmode_disp() {
+    case "$1" in
+        "manual") echo "$STR_GM_MANUAL" ;;
+        "auto") echo "$STR_GM_AUTO" ;;
         *) echo "$1" ;;
     esac
 }
@@ -175,12 +192,13 @@ show_menu() {
     
     # 彻底禁用 UI 工具的历史记忆排序，强制严格遵守传入的字符串顺序
     if command -v fuzzel >/dev/null; then
+        # fuzzel 没有禁用缓存的参数，将其指向系统的 tmp 内存盘以避免污染
         echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
-        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
+        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt"
     elif command -v wofi >/dev/null; then
         echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
-
+ || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
@@ -217,7 +235,7 @@ show_stop_menu() {
     fi
 }
 
-# --- 后处理 (使用 xdg-open) ---
+# --- 后处理 ---
 post_process() {
     local out_img="$1"
     [[ ! -f "$out_img" ]] && die "output image not found"
@@ -292,6 +310,9 @@ run_grim() {
     local out_img
     out_img=$(get_output_path)
     
+    local gmode
+    gmode=$(get_conf "$FILE_GRIM_MODE" "manual")
+    
     GRIM_TMP_DIR="/tmp/wl_longshot_$$"
     GRIM_FIFO="$GRIM_TMP_DIR/fifo"
     local base_img="$GRIM_TMP_DIR/base.png"
@@ -321,26 +342,31 @@ run_grim() {
         local choice
         choice=$(show_menu "$STR_CAP_NEXT\n$STR_FINISH\n$STR_ABORT" "$STR_GRIM_MODE")
         
-        # 如果用户按 Esc 取消菜单，我们当做正常 Finish 处理，不报错退出
-        if [[ -z "$choice" ]]; then
-            break
-        fi
+        if [[ -z "$choice" ]]; then break; fi
         
-        # 全面使用模糊匹配，无惧任何空格和序号干扰
         case "$choice" in
             *"$STR_CAP_NEXT"*)
                 sleep 0.2
-                local next_geo
-                next_geo=$(slurp) || continue
-                [[ -z "$next_geo" ]] && continue
+                local final_geo
                 
-                IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
-                local final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
+                # 核心功能：自动/手动分支判断
+                if [[ "$gmode" == "auto" ]]; then
+                    # 自动模式：直接使用第一张图的完美坐标
+                    final_geo="$geo"
+                else
+                    # 手动模式：继续画框
+                    local next_geo
+                    next_geo=$(slurp) || continue
+                    [[ -z "$next_geo" ]] && continue
+                    
+                    IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
+                    final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
+                fi
+                
                 local next_img="$GRIM_TMP_DIR/next_$idx.png"
                 grim -g "$final_geo" "$next_img"
                 
                 echo "$next_img" >&3 2>/dev/null || true
-                
                 idx=$((idx + 1))
                 ;;
             *"$STR_FINISH"*) break ;;
@@ -395,8 +421,16 @@ while true; do
                 a_raw=$(get_conf "$FILE_ACTION" "preview")
                 a_lbl=$(get_action_disp "$a_raw")
                 
-                s_choice=$(show_menu "$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]" "$STR_SETTINGS")
+                # 动态生成菜单，只有 grim 后端才显示“截图方式”
+                menu_content="$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]"
                 
+                if [[ "$b_lbl" == "grim" ]]; then
+                    g_raw=$(get_conf "$FILE_GRIM_MODE" "manual")
+                    g_lbl=$(get_gmode_disp "$g_raw")
+                    menu_content="$menu_content\n$STR_GMODE_LBL [$g_lbl]"
+                fi
+                
+                s_choice=$(show_menu "$menu_content" "$STR_SETTINGS")
                 [[ -z "$s_choice" ]] && break
 
                 case "$s_choice" in
@@ -408,7 +442,6 @@ while true; do
                             *"wl-screenrec"*) set_conf "$FILE_BACKEND" "wl-screenrec" ;;
                             *"wf-recorder"*)  set_conf "$FILE_BACKEND" "wf-recorder" ;;
                             *"grim"*)         set_conf "$FILE_BACKEND" "grim" ;;
-                            *"$STR_BACK"*|"") ;;
                         esac
                         backend=$(get_conf "$FILE_BACKEND")
                         check_deps "$backend"
@@ -420,7 +453,14 @@ while true; do
                             *"$STR_ACT_PREV"*) set_conf "$FILE_ACTION" "preview" ;;
                             *"$STR_ACT_EDIT"*) set_conf "$FILE_ACTION" "edit" ;;
                             *"$STR_ACT_SAVE"*) set_conf "$FILE_ACTION" "save" ;;
-                            *"$STR_BACK"*|"")  ;;
+                        esac
+                        ;;
+                        
+                    *"$STR_GMODE_LBL "*)
+                        g_choice=$(show_menu "$STR_BACK\n$STR_GM_MANUAL\n$STR_GM_AUTO" "$STR_GMODE_LBL")
+                        case "$g_choice" in
+                            *"$STR_GM_MANUAL"*) set_conf "$FILE_GRIM_MODE" "manual" ;;
+                            *"$STR_GM_AUTO"*)   set_conf "$FILE_GRIM_MODE" "auto" ;;
                         esac
                         ;;
                 esac
