@@ -18,7 +18,7 @@ if echo "${LANG:-}" | grep -iq "zh"; then
     STR_ACT_SAVE="仅保存"
     
     STR_REC_STOP="停止"
-    STR_RECORDING="录制中..."
+    STR_RECORDING="录制中"
     
     STR_GRIM_MODE="Grim 模式"
     STR_CAP_NEXT="截取下一张"
@@ -43,7 +43,7 @@ else
     STR_ACT_SAVE="Save Only"
     
     STR_REC_STOP="Stop"
-    STR_RECORDING="Recording..."
+    STR_RECORDING="Recording"
     
     STR_GRIM_MODE="Grim Mode"
     STR_CAP_NEXT="Capture Next"
@@ -72,7 +72,7 @@ fi
 
 mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 
-# --- 全局安全清理机制 (修复变量未绑定 Bug) ---
+# --- 全局安全清理机制 ---
 GRIM_TMP_DIR=""
 GRIM_FIFO=""
 WORKER_PID=""
@@ -181,7 +181,18 @@ show_menu() {
     fi
 }
 
-# --- 后处理 (使用 xdg-open) ---
+# 专门为“停止录制”定制的超小菜单
+show_stop_menu() {
+    if command -v fuzzel >/dev/null; then
+        echo "$STR_REC_STOP" | fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING "
+    elif command -v wofi >/dev/null; then
+        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150
+    elif command -v rofi >/dev/null; then
+        echo "$STR_REC_STOP" | rofi -dmenu -p "$STR_RECORDING" -l 1
+    fi
+}
+
+# --- 后处理 ---
 post_process() {
     local out_img="$1"
     [[ ! -f "$out_img" ]] && die "output image not found"
@@ -237,7 +248,9 @@ run_video() {
     sleep 0.5
     kill -0 $pid 2>/dev/null || die "backend crashed: $backend"
 
-    show_menu "$STR_REC_STOP" "$STR_RECORDING" >/dev/null || true
+    # 调用紧凑版菜单
+    show_stop_menu >/dev/null || true
+    
     kill -SIGINT $pid || true
     wait $pid 2>/dev/null || true
 
@@ -253,7 +266,6 @@ run_video() {
 run_grim() {
     local out_img=$(get_output_path)
     
-    # 赋值给全局清理变量
     GRIM_TMP_DIR="/tmp/wl_longshot_$$"
     GRIM_FIFO="$GRIM_TMP_DIR/fifo"
     local base_img="$GRIM_TMP_DIR/base.png"
@@ -295,16 +307,17 @@ run_grim() {
                 local next_img="$GRIM_TMP_DIR/next_$idx.png"
                 grim -g "$final_geo" "$next_img"
                 
-                echo "$next_img" >&3
-                ((idx++))
+                echo "$next_img" >&3 2>/dev/null || true
+                
+                # 修复核心 BUG：使用安全递增替代会导致 set -e 触发崩溃的 ((idx++))
+                idx=$((idx + 1))
                 ;;
             "$STR_FINISH") break ;;
             "$STR_ABORT"|"") exit 0 ;;
         esac
     done
 
-    # 正常结束，优雅关闭 Worker
-    echo "DONE" >&3
+    echo "DONE" >&3 2>/dev/null || true
     wait "$WORKER_PID" 2>/dev/null || true
     exec 3>&-
 
@@ -313,7 +326,6 @@ run_grim() {
         post_process "$out_img"
     fi
 
-    # 清空状态
     rm -rf "$GRIM_TMP_DIR"
     GRIM_TMP_DIR=""
     GRIM_FIFO=""
