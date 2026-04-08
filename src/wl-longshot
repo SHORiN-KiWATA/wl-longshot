@@ -80,6 +80,11 @@ if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
 else
     STITCHER="$(dirname "${BASH_SOURCE[0]}")/stitcher.py"
 fi
+if [[ -f "/usr/share/$APP_NAME/drawbox.py" ]]; then
+    DRAWBOX="/usr/share/$APP_NAME/drawbox.py"
+else
+    DRAWBOX="$(dirname "${BASH_SOURCE[0]}")/drawbox.py"
+fi
 
 mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 
@@ -87,6 +92,8 @@ mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 GRIM_TMP_DIR=""
 GRIM_FIFO=""
 WORKER_PID=""
+BOX_PID="" # 【新增】用于记录画框脚本的进程ID
+PYTHON_DRAW_SCRIPT="/tmp/wl_longshot_drawbox_$$.py"
 
 cleanup() {
     if [[ -n "${GRIM_FIFO:-}" ]]; then 
@@ -95,11 +102,139 @@ cleanup() {
     if [[ -n "${WORKER_PID:-}" ]]; then 
         kill "$WORKER_PID" 2>/dev/null || true
     fi
+    # 【新增】清理画框进程和临时脚本
+    if [[ -n "${BOX_PID:-}" ]]; then 
+        kill "$BOX_PID" 2>/dev/null || true
+    fi
+
     if [[ -n "${GRIM_TMP_DIR:-}" ]] && [[ -d "${GRIM_TMP_DIR:-}" ]]; then 
         rm -rf "$GRIM_TMP_DIR"
     fi
 }
 trap cleanup EXIT SIGINT SIGTERM
+
+# --- 【新增】动态生成画框 Python 脚本 ---
+create_draw_box_script() {
+    cat << 'EOF' > "$PYTHON_DRAW_SCRIPT"
+#!/usr/bin/env python3
+import sys, os, gi, cairo
+os.environ["GDK_BACKEND"] = "wayland"
+gi.require_version("Gtk", "3.0")
+gi.require_version("GtkLayerShell", "0.1")
+from gi.repository import Gtk, GtkLayerShell, Gdk
+
+if len(sys.argv) != 5:
+    sys.exit(1)
+global_x, global_y, w, h = map(int, sys.argv[1:5])
+
+window = Gtk.Window()
+window.set_app_paintable(True)
+window.set_decorated(False)
+window.set_resizable(False)
+
+# 动态获取 Matugen / GTK 主题的强调色！
+style_context = window.get_style_context()
+found, color = style_context.lookup_color("accent_color")
+if not found:
+    found, color = style_context.lookup_color("theme_selected_bg_color")
+
+if found:
+    R, G, B = color.red, color.green, color.blue
+else:
+    R, G, B = 1.0, 1.0, 1.0
+
+css_provider = Gtk.CssProvider()
+css_provider.load_from_data(b"window { background: transparent; margin: 0px; padding: 0px; border: none; } decoration { box-shadow: none; border: none; background: transparent; }")
+Gtk.StyleContext.add_provider_for_screen(window.get_screen(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+drawing_area = Gtk.DrawingArea()
+window.add(drawing_area)
+
+if window.get_screen().get_rgba_visual():
+    window.set_visual(window.get_screen().get_rgba_visual())
+
+GtkLayerShell.init_for_window(window)
+GtkLayerShell.set_layer(window, GtkLayerShell.Layer.OVERLAY)
+GtkLayerShell.set_exclusive_zone(window, -1)
+GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.TOP, True)
+GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.BOTTOM, True)
+GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.LEFT, True)
+GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.RIGHT, True)
+
+display = Gdk.Display.get_default()
+target_monitor = None
+local_x, local_y = global_x, global_y
+
+for i in range(display.get_n_monitors()):
+    monitor = display.get_monitor(i)
+    geom = monitor.get_geometry()
+    if geom.x <= global_x < geom.x + geom.width and geom.y <= global_y < geom.y + geom.height:
+        target_monitor = monitor
+        local_x = global_x - geom.x
+        local_y = global_y - geom.y
+        break
+
+if target_monitor:
+    GtkLayerShell.set_monitor(window, target_monitor)
+
+def on_draw(widget, cr):
+    cr.set_antialias(cairo.ANTIALIAS_NONE)
+    cr.set_operator(cairo.OPERATOR_SOURCE)
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
+    cr.paint()
+    cr.set_operator(cairo.OPERATOR_OVER)
+
+    safe_gap = 2
+    cx = local_x - safe_gap
+    cy = local_y - safe_gap
+    cw = w + safe_gap * 2
+    ch = h + safe_gap * 2
+
+    # 1. 基础辅助线 (改为 2px)
+    cr.set_source_rgba(R, G, B, 0.3)  # 30% 透明度的强调色
+    cr.set_line_width(2)              # 变更为 2px
+    # 线宽变为 2px 后，Cairo 的路径向外偏移 1.0，保证内侧边缘安全
+    cr.rectangle(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0)
+    cr.stroke()
+
+    # 2. 画高亮的四个相机取景器边角 (保持 3px 不变，视觉上有个层次过渡)
+    cr.set_source_rgba(R, G, B, 1.0)
+    cr.set_line_width(3)
+    
+    corner_len = min(20, cw/4, ch/4)
+    bx = cx - 1.5
+    by = cy - 1.5
+    bw = cw + 3
+    bh = ch + 3
+
+    # 左上角
+    cr.move_to(bx, by + corner_len)
+    cr.line_to(bx, by)
+    cr.line_to(bx + corner_len, by)
+    # 右上角
+    cr.move_to(bx + bw - corner_len, by)
+    cr.line_to(bx + bw, by)
+    cr.line_to(bx + bw, by + corner_len)
+    # 右下角
+    cr.move_to(bx + bw, by + bh - corner_len)
+    cr.line_to(bx + bw, by + bh)
+    cr.line_to(bx + bw - corner_len, by + bh)
+    # 左下角
+    cr.move_to(bx + corner_len, by + bh)
+    cr.line_to(bx, by + bh)
+    cr.line_to(bx, by + bh - corner_len)
+    
+    cr.stroke()
+    return False
+
+drawing_area.connect("draw", on_draw)
+empty_region = cairo.Region()
+window.input_shape_combine_region(empty_region)
+window.show_all()
+Gtk.main()
+EOF
+    chmod +x "$PYTHON_DRAW_SCRIPT"
+}
 
 # --- Utils ---
 die() { echo "error: $1" >&2; exit 1; }
@@ -190,6 +325,8 @@ check_deps() {
         command -v "$dep" >/dev/null || die "missing dependency: $dep"
     done
     python3 -c "import cv2, numpy" &>/dev/null || die "missing python modules: opencv-python, numpy"
+    # 隐藏检查 GTK 和 LayerShell 依赖
+    python3 -c "import gi; gi.require_version('Gtk', '3.0'); gi.require_version('GtkLayerShell', '0.1')" &>/dev/null || die "missing python modules for drawing box: python-gobject, gtk-layer-shell"
 }
 
 # --- UI 菜单 ---
@@ -197,19 +334,14 @@ show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
     
-    # 1. 如果用户自定义了菜单命令，优先使用 (假设工具支持 -p 传递提示词，符合 dmenu 标准)
     if [[ -n "${CUSTOM_MENU:-}" ]]; then
         echo -e "$content" | eval "$CUSTOM_MENU -p '$prompt: '" || true
-    
-    # 2. 默认后备工具链：Fuzzel -> Rofi -> Wofi
     elif command -v fuzzel >/dev/null; then
         echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
         echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
     elif command -v wofi >/dev/null; then
         echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
-    
-    # 3. 纯终端文字交互兜底
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
@@ -218,7 +350,6 @@ show_menu() {
             echo "$i) $opt" >&2
             i=$((i + 1))
         done
-        
         local ans
         read -r -p "> " ans || true
         if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans > 0 && ans <= ${#options[@]} )); then
@@ -283,6 +414,7 @@ get_output_path() {
 }
 
 # --- 录屏后端 ---
+# --- 录屏后端 ---
 run_video() {
     local backend="$1"
     local out_img
@@ -291,6 +423,14 @@ run_video() {
     local geo
     geo=$(slurp) || exit 0
     [[ -z "$geo" ]] && exit 0
+
+    # 【新增】录屏后端：在获取坐标后立即显示红框
+    create_draw_box_script
+    IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
+    python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
+    BOX_PID=$!
+
+    sleep 0.3
 
     local tmp_vid="/tmp/wl_longshot_$$.mp4"
     local pid
@@ -309,6 +449,12 @@ run_video() {
     
     kill -SIGINT $pid || true
     wait $pid 2>/dev/null || true
+
+    # 【新增】录制完成，杀掉画框进程
+    if [[ -n "${BOX_PID:-}" ]]; then 
+        kill "$BOX_PID" 2>/dev/null || true
+        BOX_PID=""
+    fi
 
     if [[ -f "$tmp_vid" ]]; then
         notify "$STR_NOTIFY_PROC" "$STR_NOTIFY_STITCH"
@@ -337,6 +483,14 @@ run_grim() {
     [[ -z "$geo" ]] && exit 0
     
     IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
+    
+    # 【新增】Grim 自动等高模式下：获取坐标后显示红框
+    if [[ "$gmode" == "auto" ]]; then
+        create_draw_box_script
+        python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
+        BOX_PID=$!
+    fi
+
     grim -g "$geo" "$base_img"
 
     mkfifo "$GRIM_FIFO"
@@ -387,6 +541,12 @@ run_grim() {
     echo "DONE" >&3 2>/dev/null || true
     wait "$WORKER_PID" 2>/dev/null || true
     exec 3>&-
+
+    # 【新增】流程结束（无论是Finish还是Abort退出循环），杀掉画框进程
+    if [[ -n "${BOX_PID:-}" ]]; then 
+        kill "$BOX_PID" 2>/dev/null || true
+        BOX_PID=""
+    fi
 
     if [[ -f "$base_img" ]]; then
         mv "$base_img" "$out_img"
