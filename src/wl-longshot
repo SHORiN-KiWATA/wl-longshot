@@ -35,6 +35,10 @@ if echo "${LANG:-}" | grep -iq "zh"; then
     STR_GMODE_LBL="截图方式"
     STR_GM_MANUAL="手动框选"
     STR_GM_AUTO="自动等高"
+    STR_DEDUP_LBL="去重"
+    STR_FIXED_WIDTH_LBL="定宽"
+    STR_ON="开"
+    STR_OFF="关"
 else
     STR_CAP_AREA="Capture Area"
     STR_SETTINGS="Settings"
@@ -64,26 +68,34 @@ else
     STR_GMODE_LBL="Capture Mode"
     STR_GM_MANUAL="Manual"
     STR_GM_AUTO="Auto Fixed"
+    STR_DEDUP_LBL="Deduplicate"
+    STR_FIXED_WIDTH_LBL="Fixed Width"
+    STR_ON="On"
+    STR_OFF="Off"
 fi
 
 # --- Constants & Paths ---
 APP_NAME="wl-longshot"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
 SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
+MENU_MIN_LINES=1
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
 
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
 FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
+FILE_GRIM_DEDUP="$CONFIG_DIR/grim_dedup"
+FILE_GRIM_FIXED_WIDTH="$CONFIG_DIR/grim_fixed_width"
 
-if [[ -f "/usr/share/$APP_NAME/stitcher.py" ]]; then
+if [[ -f "$SCRIPT_DIR/stitcher.py" ]]; then
+    STITCHER="$SCRIPT_DIR/stitcher.py"
+else
     STITCHER="/usr/share/$APP_NAME/stitcher.py"
-else
-    STITCHER="$(dirname "${BASH_SOURCE[0]}")/stitcher.py"
 fi
-if [[ -f "/usr/share/$APP_NAME/drawbox.py" ]]; then
-    DRAWBOX="/usr/share/$APP_NAME/drawbox.py"
+if [[ -f "$SCRIPT_DIR/drawbox.py" ]]; then
+    DRAWBOX="$SCRIPT_DIR/drawbox.py"
 else
-    DRAWBOX="$(dirname "${BASH_SOURCE[0]}")/drawbox.py"
+    DRAWBOX="/usr/share/$APP_NAME/drawbox.py"
 fi
 
 mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
@@ -259,6 +271,14 @@ get_gmode_disp() {
     esac
 }
 
+get_switch_disp() {
+    case "$1" in
+        "on") echo "$STR_ON" ;;
+        "off") echo "$STR_OFF" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 # --- CLI 参数解析 ---
 show_help() {
     cat << EOF
@@ -333,15 +353,26 @@ check_deps() {
 show_menu() {
     local content="$1"
     local prompt="${2:-$APP_NAME}"
+    local lines=1
+    local rest="$content"
+
+    while [[ "$rest" == *\\n* ]]; do
+        lines=$((lines + 1))
+        rest="${rest#*\\n}"
+    done
+
+    if (( lines < MENU_MIN_LINES )); then
+        lines=$MENU_MIN_LINES
+    fi
     
     if [[ -n "${CUSTOM_MENU:-}" ]]; then
         echo -e "$content" | eval "$CUSTOM_MENU -p '$prompt: '" || true
     elif command -v fuzzel >/dev/null; then
-        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines 4 -p "$prompt: " || true
+        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines "$lines" -p "$prompt: " || true
     elif command -v rofi >/dev/null; then
         echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
     elif command -v wofi >/dev/null; then
-        echo -e "$content" | wofi -d -i -p "$prompt" --lines 4 --cache-file /dev/null || true
+        echo -e "$content" | wofi -d -i -p "$prompt" --lines "$lines" --cache-file /dev/null || true
     elif [[ -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
@@ -471,6 +502,10 @@ run_grim() {
     
     local gmode
     gmode=$(get_conf "$FILE_GRIM_MODE" "manual")
+    local grim_dedup
+    grim_dedup=$(get_conf "$FILE_GRIM_DEDUP" "on")
+    local grim_fixed_width
+    grim_fixed_width=$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")
     
     GRIM_TMP_DIR="/tmp/wl_longshot_$$"
     GRIM_FIFO="$GRIM_TMP_DIR/fifo"
@@ -499,7 +534,14 @@ run_grim() {
     (
         while read -r task <&3; do
             [[ "$task" == "DONE" ]] && break
-            python3 "$STITCHER" incremental --base "$base_img" --next "$task" --out "$base_img"
+            local stitch_args=(incremental --base "$base_img" --next "$task" --out "$base_img")
+            if [[ "$gmode" == "manual" && "$grim_fixed_width" == "off" ]]; then
+                stitch_args+=(--keep-widths)
+            fi
+            if [[ "$gmode" == "manual" && "$grim_dedup" == "off" ]]; then
+                stitch_args+=(--no-dedup)
+            fi
+            python3 "$STITCHER" "${stitch_args[@]}"
         done
     ) &
     WORKER_PID=$!
@@ -522,9 +564,13 @@ run_grim() {
                     local next_geo
                     next_geo=$(slurp) || continue
                     [[ -z "$next_geo" ]] && continue
-                    
-                    IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
-                    final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
+
+                    if [[ "$grim_fixed_width" == "off" ]]; then
+                        final_geo="$next_geo"
+                    else
+                        IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
+                        final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
+                    fi
                 fi
                 
                 local next_img="$GRIM_TMP_DIR/next_$idx.png"
@@ -597,6 +643,15 @@ while true; do
                     g_raw=$(get_conf "$FILE_GRIM_MODE" "manual")
                     g_lbl=$(get_gmode_disp "$g_raw")
                     menu_content="$menu_content\n$STR_GMODE_LBL [$g_lbl]"
+
+                    if [[ "$g_raw" == "manual" ]]; then
+                        w_raw=$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")
+                        w_lbl=$(get_switch_disp "$w_raw")
+                        d_raw=$(get_conf "$FILE_GRIM_DEDUP" "on")
+                        d_lbl=$(get_switch_disp "$d_raw")
+                        menu_content="$menu_content\n$STR_FIXED_WIDTH_LBL [$w_lbl]"
+                        menu_content="$menu_content\n$STR_DEDUP_LBL [$d_lbl]"
+                    fi
                 fi
                 
                 s_choice=$(show_menu "$menu_content" "$STR_SETTINGS")
@@ -633,6 +688,22 @@ while true; do
                             set_conf "$FILE_GRIM_MODE" "auto"
                         else
                             set_conf "$FILE_GRIM_MODE" "manual"
+                        fi
+                        ;;
+
+                    *"$STR_FIXED_WIDTH_LBL "*)
+                        if [[ "$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")" == "on" ]]; then
+                            set_conf "$FILE_GRIM_FIXED_WIDTH" "off"
+                        else
+                            set_conf "$FILE_GRIM_FIXED_WIDTH" "on"
+                        fi
+                        ;;
+
+                    *"$STR_DEDUP_LBL "*)
+                        if [[ "$(get_conf "$FILE_GRIM_DEDUP" "on")" == "on" ]]; then
+                            set_conf "$FILE_GRIM_DEDUP" "off"
+                        else
+                            set_conf "$FILE_GRIM_DEDUP" "on"
                         fi
                         ;;
                 esac

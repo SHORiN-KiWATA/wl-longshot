@@ -9,24 +9,59 @@ def err(msg):
     sys.stderr.write(f"error: {msg}\n")
     sys.exit(1)
 
-def stitch_incremental(base_path, next_path, out_path, min_overlap=20, threshold=15.0):
-    img_base = cv2.imread(base_path)
-    img_next = cv2.imread(next_path)
+def ensure_bgra(img):
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGRA)
+    if img.shape[2] == 4:
+        return img
+    return cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+
+def to_gray(img):
+    if img.ndim == 2:
+        return img
+    if img.shape[2] == 4:
+        return cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+    return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+def pad_width(img, width):
+    h, w = img.shape[:2]
+    if w >= width:
+        return img
+
+    pad_shape = (h, width - w, img.shape[2]) if img.ndim == 3 else (h, width - w)
+    pad = np.zeros(pad_shape, dtype=img.dtype)
+    return np.hstack((img, pad))
+
+def stitch_incremental(base_path, next_path, out_path, min_overlap=20, threshold=15.0, dedup=True, keep_widths=False):
+    img_base = cv2.imread(base_path, cv2.IMREAD_UNCHANGED)
+    img_next = cv2.imread(next_path, cv2.IMREAD_UNCHANGED)
     if img_base is None or img_next is None:
         err("failed to read input images")
 
     h_base, w_base = img_base.shape[:2]
     h_next, w_next = img_next.shape[:2]
 
-    if w_base != w_next:
+    if w_base != w_next and not keep_widths:
         img_next = cv2.resize(img_next, (w_base, h_next))
         h_next = img_next.shape[0]
+        w_next = img_next.shape[1]
+
+    if w_base != w_next and keep_widths:
+        img_base = ensure_bgra(img_base)
+        img_next = ensure_bgra(img_next)
+
+    out_w = max(w_base, w_next)
+
+    if not dedup:
+        cv2.imwrite(out_path, np.vstack((pad_width(img_base, out_w), pad_width(img_next, out_w))))
+        return
 
     search_h = min(h_base, h_next)
+    search_w = min(w_base, w_next)
     img_base_tail = img_base[-search_h:]
 
-    gray_base = cv2.cvtColor(img_base_tail, cv2.COLOR_BGR2GRAY)
-    gray_next = cv2.cvtColor(img_next, cv2.COLOR_BGR2GRAY)
+    gray_base = to_gray(img_base_tail[:, :search_w])
+    gray_next = to_gray(img_next[:, :search_w])
     edges_base = cv2.Canny(gray_base, 50, 150)
     edges_next = cv2.Canny(gray_next, 50, 150)
 
@@ -44,9 +79,9 @@ def stitch_incremental(base_path, next_path, out_path, min_overlap=20, threshold
                 best_overlap = k
 
     if best_overlap > 0:
-        result = np.vstack((img_base, img_next[best_overlap:, :]))
+        result = np.vstack((pad_width(img_base, out_w), pad_width(img_next[best_overlap:, :], out_w)))
     else:
-        result = np.vstack((img_base, img_next))
+        result = np.vstack((pad_width(img_base, out_w), pad_width(img_next, out_w)))
 
     cv2.imwrite(out_path, result)
 
@@ -130,6 +165,8 @@ if __name__ == "__main__":
     parser_inc.add_argument("--base", required=True)
     parser_inc.add_argument("--next", required=True)
     parser_inc.add_argument("--out", required=True)
+    parser_inc.add_argument("--no-dedup", action="store_true")
+    parser_inc.add_argument("--keep-widths", action="store_true")
 
     parser_vid = subparsers.add_parser("video")
     parser_vid.add_argument("--in", dest="input", required=True)
@@ -138,6 +175,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.mode == "incremental":
-        stitch_incremental(args.base, args.next, args.out)
+        stitch_incremental(args.base, args.next, args.out, dedup=not args.no_dedup, keep_widths=args.keep_widths)
     elif args.mode == "video":
         stitch_video(args.input, args.out)
