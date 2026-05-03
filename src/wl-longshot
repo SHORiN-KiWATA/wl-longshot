@@ -1,6 +1,6 @@
 #!/bin/bash
 # wl-longshot - Wayland scrolling screenshot utility
-# Copyright (C) 2024 Your Name 
+# Copyright (C) 2024 Shorin
 # Licensed under the GPLv3
 
 set -euo pipefail
@@ -445,7 +445,6 @@ get_output_path() {
 }
 
 # --- 录屏后端 ---
-# --- 录屏后端 ---
 run_video() {
     local backend="$1"
     local out_img
@@ -501,7 +500,7 @@ run_grim() {
     out_img=$(get_output_path)
     
     local gmode
-    gmode=$(get_conf "$FILE_GRIM_MODE" "manual")
+    gmode=$(get_conf "$FILE_GRIM_MODE" "auto") # 【已修改为默认 auto】
     local grim_dedup
     grim_dedup=$(get_conf "$FILE_GRIM_DEDUP" "on")
     local grim_fixed_width
@@ -606,7 +605,7 @@ run_grim() {
 }
 
 # --- 启动逻辑 ---
-backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "wl-screenrec")}"
+backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "grim")}" # 【已修改为默认 grim】
 check_deps "$backend"
 
 if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
@@ -633,14 +632,14 @@ while true; do
             ;;
         *"$STR_SETTINGS"*)
             while true; do
-                b_lbl=$(get_conf "$FILE_BACKEND" "wl-screenrec")
+                b_lbl=$(get_conf "$FILE_BACKEND" "grim") # 【已修改为默认 grim】
                 a_raw=$(get_conf "$FILE_ACTION" "preview")
                 a_lbl=$(get_action_disp "$a_raw")
                 
                 menu_content="$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]"
                 
                 if [[ "$b_lbl" == "grim" ]]; then
-                    g_raw=$(get_conf "$FILE_GRIM_MODE" "manual")
+                    g_raw=$(get_conf "$FILE_GRIM_MODE" "auto") # 【已修改为默认 auto】
                     g_lbl=$(get_gmode_disp "$g_raw")
                     menu_content="$menu_content\n$STR_GMODE_LBL [$g_lbl]"
 
@@ -684,7 +683,7 @@ while true; do
                         
                     *"$STR_GMODE_LBL "*)
                         # 核心修改：点击截图方式直接反转配置，取消子菜单
-                        if [[ "$(get_conf "$FILE_GRIM_MODE" "manual")" == "manual" ]]; then
+                        if [[ "$(get_conf "$FILE_GRIM_MODE" "auto")" == "manual" ]]; then # 【此处对应修改回退值为 auto】
                             set_conf "$FILE_GRIM_MODE" "auto"
                         else
                             set_conf "$FILE_GRIM_MODE" "manual"
