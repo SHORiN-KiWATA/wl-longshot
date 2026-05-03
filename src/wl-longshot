@@ -1,78 +1,9 @@
 #!/bin/bash
 # wl-longshot - Wayland scrolling screenshot utility
-# Copyright (C) 2024 Shorin
+# Copyright (C) 2024 Your Name 
 # Licensed under the GPLv3
 
 set -euo pipefail
-
-# --- i18n 国际化支持 ---
-if echo "${LANG:-}" | grep -iq "zh"; then
-    STR_CAP_AREA="截取区域"
-    STR_SETTINGS="设置"
-    STR_QUIT="退出"
-    
-    STR_BACK="返回"
-    STR_BACKEND="后端"
-    STR_ACTION="动作"
-    
-    STR_ACT_PREV="预览"
-    STR_ACT_EDIT="编辑"
-    STR_ACT_SAVE="仅保存"
-    
-    STR_REC_STOP="停止"
-    STR_RECORDING="录制中"
-    
-    STR_GRIM_MODE="Grim 模式"
-    STR_CAP_NEXT="截取下一张"
-    STR_FINISH="完成"
-    STR_ABORT="放弃"
-    
-    STR_NOTIFY_PROC="处理中"
-    STR_NOTIFY_STITCH="正在拼接视频帧..."
-    STR_NOTIFY_SUCC="成功"
-    STR_NOTIFY_SAVED="已保存至"
-    
-    STR_GMODE_LBL="截图方式"
-    STR_GM_MANUAL="手动框选"
-    STR_GM_AUTO="自动等高"
-    STR_DEDUP_LBL="去重"
-    STR_FIXED_WIDTH_LBL="定宽"
-    STR_ON="开"
-    STR_OFF="关"
-else
-    STR_CAP_AREA="Capture Area"
-    STR_SETTINGS="Settings"
-    STR_QUIT="Quit"
-    
-    STR_BACK="Back"
-    STR_BACKEND="Backend"
-    STR_ACTION="Action"
-    
-    STR_ACT_PREV="Preview"
-    STR_ACT_EDIT="Edit"
-    STR_ACT_SAVE="Save Only"
-    
-    STR_REC_STOP="Stop"
-    STR_RECORDING="Recording"
-    
-    STR_GRIM_MODE="Grim Mode"
-    STR_CAP_NEXT="Capture Next"
-    STR_FINISH="Finish"
-    STR_ABORT="Abort"
-    
-    STR_NOTIFY_PROC="Processing"
-    STR_NOTIFY_STITCH="Stitching video frames..."
-    STR_NOTIFY_SUCC="Success"
-    STR_NOTIFY_SAVED="Saved to"
-    
-    STR_GMODE_LBL="Capture Mode"
-    STR_GM_MANUAL="Manual"
-    STR_GM_AUTO="Auto Fixed"
-    STR_DEDUP_LBL="Deduplicate"
-    STR_FIXED_WIDTH_LBL="Fixed Width"
-    STR_ON="On"
-    STR_OFF="Off"
-fi
 
 # --- Constants & Paths ---
 APP_NAME="wl-longshot"
@@ -86,6 +17,105 @@ FILE_ACTION="$CONFIG_DIR/action"
 FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
 FILE_GRIM_DEDUP="$CONFIG_DIR/grim_dedup"
 FILE_GRIM_FIXED_WIDTH="$CONFIG_DIR/grim_fixed_width"
+
+# --- i18n 国际化支持 (全面覆盖 UI 与 CLI) ---
+if echo "${LANG:-}" | grep -iq "zh"; then
+    # UI 文本
+    STR_CAP_AREA="截取区域"
+    STR_SETTINGS="设置"
+    STR_QUIT="退出"
+    STR_BACK="返回"
+    STR_BACKEND="后端"
+    STR_ACTION="动作"
+    STR_ACT_PREV="预览"
+    STR_ACT_EDIT="编辑"
+    STR_ACT_SAVE="仅保存"
+    STR_REC_STOP="停止"
+    STR_RECORDING="录制中"
+    STR_GRIM_MODE="Grim 模式"
+    STR_CAP_NEXT="截取下一张"
+    STR_FINISH="完成"
+    STR_ABORT="放弃"
+    STR_NOTIFY_PROC="处理中"
+    STR_NOTIFY_STITCH="正在拼接视频帧..."
+    STR_NOTIFY_SUCC="成功"
+    STR_NOTIFY_SAVED="已保存至"
+    STR_GMODE_LBL="截图方式"
+    STR_GM_MANUAL="手动框选"
+    STR_GM_AUTO="自动等高"
+    STR_DEDUP_LBL="去重"
+    STR_FIXED_WIDTH_LBL="定宽"
+    STR_ON="开"
+    STR_OFF="关"
+    
+    # CLI 输出与报错
+    STR_ERR="错误"
+    STR_ERR_DEP="缺少依赖"
+    STR_ERR_PY="缺少 Python 模块"
+    STR_ERR_CRASH="后端崩溃"
+    STR_ERR_NO_IMG="未找到输出图像"
+    STR_ERR_INV_B="无效的后端"
+    STR_ERR_NO_GUI="未找到 GUI 菜单程序且未在交互式终端中运行。"
+    STR_ERR_OPT="未知选项"
+    STR_ERR_ARG="缺少参数"
+    
+    # 帮助文档
+    STR_HELP_USAGE="用法: $APP_NAME [选项]"
+    STR_HELP_DESC="一个适用于 Wayland 混成器的智能长截图工具。"
+    STR_HELP_OPTS="选项:"
+    STR_HELP_OPT_O="  -o, --output FILE   指定输出文件路径 (跳过主菜单)"
+    STR_HELP_OPT_B="  -b, --backend NAME  强制使用指定的后端 (grim, wl-screenrec, wf-recorder)"
+    STR_HELP_OPT_M="  -m, --menu CMD      覆盖默认的菜单程序 (如 'wofi')"
+    STR_HELP_OPT_H="  -h, --help          显示此帮助信息并退出"
+else
+    # UI Text
+    STR_CAP_AREA="Capture Area"
+    STR_SETTINGS="Settings"
+    STR_QUIT="Quit"
+    STR_BACK="Back"
+    STR_BACKEND="Backend"
+    STR_ACTION="Action"
+    STR_ACT_PREV="Preview"
+    STR_ACT_EDIT="Edit"
+    STR_ACT_SAVE="Save Only"
+    STR_REC_STOP="Stop"
+    STR_RECORDING="Recording"
+    STR_GRIM_MODE="Grim Mode"
+    STR_CAP_NEXT="Capture Next"
+    STR_FINISH="Finish"
+    STR_ABORT="Abort"
+    STR_NOTIFY_PROC="Processing"
+    STR_NOTIFY_STITCH="Stitching video frames..."
+    STR_NOTIFY_SUCC="Success"
+    STR_NOTIFY_SAVED="Saved to"
+    STR_GMODE_LBL="Capture Mode"
+    STR_GM_MANUAL="Manual"
+    STR_GM_AUTO="Auto Fixed"
+    STR_DEDUP_LBL="Deduplicate"
+    STR_FIXED_WIDTH_LBL="Fixed Width"
+    STR_ON="On"
+    STR_OFF="Off"
+    
+    # CLI Output & Errors
+    STR_ERR="error"
+    STR_ERR_DEP="missing dependency"
+    STR_ERR_PY="missing python modules"
+    STR_ERR_CRASH="backend crashed"
+    STR_ERR_NO_IMG="output image not found"
+    STR_ERR_INV_B="invalid backend"
+    STR_ERR_NO_GUI="No GUI menu found and not running in an interactive terminal."
+    STR_ERR_OPT="Unknown option"
+    STR_ERR_ARG="Missing argument for"
+    
+    # Help Document
+    STR_HELP_USAGE="Usage: $APP_NAME [OPTIONS]"
+    STR_HELP_DESC="A smart scrolling screenshot tool for Wayland compositors."
+    STR_HELP_OPTS="Options:"
+    STR_HELP_OPT_O="  -o, --output FILE   Specify the output file path (bypasses main menu)"
+    STR_HELP_OPT_B="  -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)"
+    STR_HELP_OPT_M="  -m, --menu CMD      Override the default dmenu-like application (e.g. 'wofi')"
+    STR_HELP_OPT_H="  -h, --help          Show this help message and exit"
+fi
 
 if [[ -f "$SCRIPT_DIR/stitcher.py" ]]; then
     STITCHER="$SCRIPT_DIR/stitcher.py"
@@ -104,7 +134,7 @@ mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
 GRIM_TMP_DIR=""
 GRIM_FIFO=""
 WORKER_PID=""
-BOX_PID="" # 【新增】用于记录画框脚本的进程ID
+BOX_PID=""
 PYTHON_DRAW_SCRIPT="/tmp/wl_longshot_drawbox_$$.py"
 
 cleanup() {
@@ -114,18 +144,16 @@ cleanup() {
     if [[ -n "${WORKER_PID:-}" ]]; then 
         kill "$WORKER_PID" 2>/dev/null || true
     fi
-    # 【新增】清理画框进程和临时脚本
     if [[ -n "${BOX_PID:-}" ]]; then 
         kill "$BOX_PID" 2>/dev/null || true
     fi
-
     if [[ -n "${GRIM_TMP_DIR:-}" ]] && [[ -d "${GRIM_TMP_DIR:-}" ]]; then 
         rm -rf "$GRIM_TMP_DIR"
     fi
 }
 trap cleanup EXIT SIGINT SIGTERM
 
-# --- 【新增】动态生成画框 Python 脚本 ---
+# --- 动态生成画框 Python 脚本 ---
 create_draw_box_script() {
     cat << 'EOF' > "$PYTHON_DRAW_SCRIPT"
 #!/usr/bin/env python3
@@ -144,7 +172,6 @@ window.set_app_paintable(True)
 window.set_decorated(False)
 window.set_resizable(False)
 
-# 动态获取 Matugen / GTK 主题的强调色！
 style_context = window.get_style_context()
 found, color = style_context.lookup_color("accent_color")
 if not found:
@@ -202,14 +229,11 @@ def on_draw(widget, cr):
     cw = w + safe_gap * 2
     ch = h + safe_gap * 2
 
-    # 1. 基础辅助线 (改为 2px)
-    cr.set_source_rgba(R, G, B, 0.3)  # 30% 透明度的强调色
-    cr.set_line_width(2)              # 变更为 2px
-    # 线宽变为 2px 后，Cairo 的路径向外偏移 1.0，保证内侧边缘安全
+    cr.set_source_rgba(R, G, B, 0.3)
+    cr.set_line_width(2)
     cr.rectangle(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0)
     cr.stroke()
 
-    # 2. 画高亮的四个相机取景器边角 (保持 3px 不变，视觉上有个层次过渡)
     cr.set_source_rgba(R, G, B, 1.0)
     cr.set_line_width(3)
     
@@ -219,19 +243,15 @@ def on_draw(widget, cr):
     bw = cw + 3
     bh = ch + 3
 
-    # 左上角
     cr.move_to(bx, by + corner_len)
     cr.line_to(bx, by)
     cr.line_to(bx + corner_len, by)
-    # 右上角
     cr.move_to(bx + bw - corner_len, by)
     cr.line_to(bx + bw, by)
     cr.line_to(bx + bw, by + corner_len)
-    # 右下角
     cr.move_to(bx + bw, by + bh - corner_len)
     cr.line_to(bx + bw, by + bh)
     cr.line_to(bx + bw - corner_len, by + bh)
-    # 左下角
     cr.move_to(bx + corner_len, by + bh)
     cr.line_to(bx, by + bh)
     cr.line_to(bx, by + bh - corner_len)
@@ -249,7 +269,7 @@ EOF
 }
 
 # --- Utils ---
-die() { echo "error: $1" >&2; exit 1; }
+die() { echo "$STR_ERR: $1" >&2; exit 1; }
 notify() { command -v notify-send >/dev/null && notify-send -a "$APP_NAME" "$1" "$2"; }
 get_conf() { cat "$1" 2>/dev/null || echo "$2"; }
 set_conf() { echo "$2" > "$1"; }
@@ -282,37 +302,37 @@ get_switch_disp() {
 # --- CLI 参数解析 ---
 show_help() {
     cat << EOF
-Usage: $APP_NAME [OPTIONS]
+$STR_HELP_USAGE
 
-A smart scrolling screenshot tool for Wayland compositors.
+$STR_HELP_DESC
 
-Options:
-  -o, --output FILE   Specify the output file path (bypasses main menu)
-  -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)
-  -m, --menu CMD      Override the default dmenu-like application (e.g. "fuzzel -d")
-  -h, --help          Show this help message and exit
+$STR_HELP_OPTS
+$STR_HELP_OPT_O
+$STR_HELP_OPT_B
+$STR_HELP_OPT_M
+$STR_HELP_OPT_H
 EOF
 }
 
 OUT_FILE=""
 FORCE_BACKEND=""
-CUSTOM_MENU=""
+FORCE_MENU=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -o|--output)
-            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
+            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
             OUT_FILE="$2"
             shift 2
             ;;
         -b|--backend)
-            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
+            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
             FORCE_BACKEND="$2"
             shift 2
             ;;
         -m|--menu)
-            if [[ $# -lt 2 ]]; then die "Missing argument for $1"; fi
-            CUSTOM_MENU="$2"
+            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
+            FORCE_MENU="$2"
             shift 2
             ;;
         -h|--help)
@@ -320,7 +340,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         *)
-            die "Unknown option: $1"
+            die "$STR_ERR_OPT $1"
             ;;
     esac
 done
@@ -342,11 +362,10 @@ check_deps() {
     fi
 
     for dep in "${deps[@]}"; do
-        command -v "$dep" >/dev/null || die "missing dependency: $dep"
+        command -v "$dep" >/dev/null || die "$STR_ERR_DEP: $dep"
     done
-    python3 -c "import cv2, numpy" &>/dev/null || die "missing python modules: opencv-python, numpy"
-    # 隐藏检查 GTK 和 LayerShell 依赖
-    python3 -c "import gi; gi.require_version('Gtk', '3.0'); gi.require_version('GtkLayerShell', '0.1')" &>/dev/null || die "missing python modules for drawing box: python-gobject, gtk-layer-shell"
+    python3 -c "import cv2, numpy" &>/dev/null || die "$STR_ERR_PY: opencv-python, numpy"
+    python3 -c "import gi; gi.require_version('Gtk', '3.0'); gi.require_version('GtkLayerShell', '0.1')" &>/dev/null || die "$STR_ERR_PY: python-gobject, gtk-layer-shell"
 }
 
 # --- UI 菜单 ---
@@ -365,15 +384,15 @@ show_menu() {
         lines=$MENU_MIN_LINES
     fi
     
-    if [[ -n "${CUSTOM_MENU:-}" ]]; then
-        echo -e "$content" | eval "$CUSTOM_MENU -p '$prompt: '" || true
-    elif command -v fuzzel >/dev/null; then
+    if [[ "$FORCE_MENU" == "fuzzel" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v fuzzel)" ]]; then
         echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines "$lines" -p "$prompt: " || true
-    elif command -v rofi >/dev/null; then
+    elif [[ "$FORCE_MENU" == "rofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v rofi)" ]]; then
         echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
-    elif command -v wofi >/dev/null; then
+    elif [[ "$FORCE_MENU" == "wofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v wofi)" ]]; then
         echo -e "$content" | wofi -d -i -p "$prompt" --lines "$lines" --cache-file /dev/null || true
-    elif [[ -t 0 ]]; then
+    elif [[ -n "$FORCE_MENU" && "$FORCE_MENU" != "cli" ]]; then
+        echo -e "$content" | eval "$FORCE_MENU -p '$prompt: '" || true
+    elif [[ "$FORCE_MENU" == "cli" || -t 0 ]]; then
         echo -e "\n=== $prompt ===" >&2
         mapfile -t options <<< "$(echo -e "$content")"
         local i=1
@@ -388,32 +407,32 @@ show_menu() {
         fi
         return 0
     else
-        die "No GUI menu found and not running in an interactive terminal."
+        die "$STR_ERR_NO_GUI"
     fi
 }
 
 show_stop_menu() {
-    if [[ -n "${CUSTOM_MENU:-}" ]]; then
-        echo "$STR_REC_STOP" | eval "$CUSTOM_MENU -p '$STR_RECORDING '" || true
-    elif command -v fuzzel >/dev/null; then
+    if [[ "$FORCE_MENU" == "fuzzel" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v fuzzel)" ]]; then
         echo "$STR_REC_STOP" | fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
-    elif command -v rofi >/dev/null; then
-        echo "$STR_REC_STOP" | rofi -dmenu -disable-history -p "$STR_RECORDING" -l 1 || true
-    elif command -v wofi >/dev/null; then
-        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" --lines 1 --width 150 --cache-file /dev/null || true
-    elif [[ -t 0 ]]; then
+    elif [[ "$FORCE_MENU" == "rofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v rofi)" ]]; then
+        echo "$STR_REC_STOP" | rofi -dmenu -disable-history -p "$STR_RECORDING" -location 2 -yoffset 20 -theme-str 'window {width: 250px;}' -l 1 || true
+    elif [[ "$FORCE_MENU" == "wofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v wofi)" ]]; then
+        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" -l top -y 20 -W 250 -H 45 --lines 1 --cache-file /dev/null || true
+    elif [[ -n "$FORCE_MENU" && "$FORCE_MENU" != "cli" ]]; then
+        echo "$STR_REC_STOP" | eval "$FORCE_MENU -p '$STR_RECORDING '" || true
+    elif [[ "$FORCE_MENU" == "cli" || -t 0 ]]; then
         echo -e "\n=== $STR_RECORDING ===" >&2
         read -r -p "Press [Enter] to $STR_REC_STOP: " _ || true
         echo "$STR_REC_STOP"
     else
-        die "No GUI menu found and not running in an interactive terminal."
+        die "$STR_ERR_NO_GUI"
     fi
 }
 
 # --- 后处理 ---
 post_process() {
     local out_img="$1"
-    [[ ! -f "$out_img" ]] && die "output image not found"
+    [[ ! -f "$out_img" ]] && die "$STR_ERR_NO_IMG"
     
     wl-copy < "$out_img"
     notify "$STR_NOTIFY_SUCC" "$STR_NOTIFY_SAVED $(basename "$out_img")"
@@ -454,7 +473,6 @@ run_video() {
     geo=$(slurp) || exit 0
     [[ -z "$geo" ]] && exit 0
 
-    # 【新增】录屏后端：在获取坐标后立即显示红框
     create_draw_box_script
     IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
     python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
@@ -473,14 +491,13 @@ run_video() {
     pid=$!
 
     sleep 0.5
-    kill -0 $pid 2>/dev/null || die "backend crashed: $backend"
+    kill -0 $pid 2>/dev/null || die "$STR_ERR_CRASH: $backend"
 
     show_stop_menu >/dev/null || true
     
     kill -SIGINT $pid || true
     wait $pid 2>/dev/null || true
 
-    # 【新增】录制完成，杀掉画框进程
     if [[ -n "${BOX_PID:-}" ]]; then 
         kill "$BOX_PID" 2>/dev/null || true
         BOX_PID=""
@@ -500,7 +517,7 @@ run_grim() {
     out_img=$(get_output_path)
     
     local gmode
-    gmode=$(get_conf "$FILE_GRIM_MODE" "auto") # 【已修改为默认 auto】
+    gmode=$(get_conf "$FILE_GRIM_MODE" "auto")
     local grim_dedup
     grim_dedup=$(get_conf "$FILE_GRIM_DEDUP" "on")
     local grim_fixed_width
@@ -518,7 +535,6 @@ run_grim() {
     
     IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
     
-    # 【新增】Grim 自动等高模式下：获取坐标后显示红框
     if [[ "$gmode" == "auto" ]]; then
         create_draw_box_script
         python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
@@ -587,7 +603,6 @@ run_grim() {
     wait "$WORKER_PID" 2>/dev/null || true
     exec 3>&-
 
-    # 【新增】流程结束（无论是Finish还是Abort退出循环），杀掉画框进程
     if [[ -n "${BOX_PID:-}" ]]; then 
         kill "$BOX_PID" 2>/dev/null || true
         BOX_PID=""
@@ -605,14 +620,14 @@ run_grim() {
 }
 
 # --- 启动逻辑 ---
-backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "grim")}" # 【已修改为默认 grim】
+backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "grim")}"
 check_deps "$backend"
 
 if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
     case "$backend" in
         "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
         "grim") run_grim ;;
-        *) die "invalid backend: $backend" ;;
+        *) die "$STR_ERR_INV_B: $backend" ;;
     esac
     exit 0
 fi
@@ -632,14 +647,14 @@ while true; do
             ;;
         *"$STR_SETTINGS"*)
             while true; do
-                b_lbl=$(get_conf "$FILE_BACKEND" "grim") # 【已修改为默认 grim】
+                b_lbl=$(get_conf "$FILE_BACKEND" "grim")
                 a_raw=$(get_conf "$FILE_ACTION" "preview")
                 a_lbl=$(get_action_disp "$a_raw")
                 
                 menu_content="$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]"
                 
                 if [[ "$b_lbl" == "grim" ]]; then
-                    g_raw=$(get_conf "$FILE_GRIM_MODE" "auto") # 【已修改为默认 auto】
+                    g_raw=$(get_conf "$FILE_GRIM_MODE" "auto")
                     g_lbl=$(get_gmode_disp "$g_raw")
                     menu_content="$menu_content\n$STR_GMODE_LBL [$g_lbl]"
 
@@ -682,8 +697,7 @@ while true; do
                         ;;
                         
                     *"$STR_GMODE_LBL "*)
-                        # 核心修改：点击截图方式直接反转配置，取消子菜单
-                        if [[ "$(get_conf "$FILE_GRIM_MODE" "auto")" == "manual" ]]; then # 【此处对应修改回退值为 auto】
+                        if [[ "$(get_conf "$FILE_GRIM_MODE" "auto")" == "manual" ]]; then
                             set_conf "$FILE_GRIM_MODE" "auto"
                         else
                             set_conf "$FILE_GRIM_MODE" "manual"
