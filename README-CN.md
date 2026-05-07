@@ -14,11 +14,11 @@
 
     它还包含一个“自动”模式：你只需框选一次区域，在后续截图时它会自动截取相同位置大小的画面。
 
-    ![](pics/grim.gif)
+    ![](pics/grimauto.gif)
 
 - `wl-screenrec`：流式录制。只需框选区域，滚动鼠标，然后停止即可完成长截图。
 
-    ![](pics/screenrec.gif)
+    ![](pics/rec.gif)
 
 - `wf-recorder`：作为备用视频后端以提供更好的兼容性，使用方式与 `wl-screenrec` 相同。
 
