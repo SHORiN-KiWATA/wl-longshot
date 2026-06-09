@@ -2,7 +2,7 @@
 
 ## [中文版](README-CN.md) | [ENGLISH](README.md)
 
-A simple scrolling screenshot tool for Wayland Compositors. 
+A simple scrolling screenshot tool for Wayland compositors.
 
 ## Features
 
@@ -12,7 +12,7 @@ Three Backends:
 
     ![](pics/grim-manual.gif)
 
-    It alse includes an "Auto" mode where you only draw the region once, and it will captures the same geometry on subsequent scrolls. 
+    It also includes an "Auto" mode where you only draw the region once, and it will capture the same geometry on subsequent scrolls.
 
     ![](pics/grimauto.gif)
 
@@ -20,7 +20,7 @@ Three Backends:
 
     ![](pics/rec.gif)
 
-- `wf-recorder`: Fallback video backend for better compatibility, as same as `wl-screenrec`
+- `wf-recorder`: Fallback video backend for better compatibility, the same as `wl-screenrec`
 
 - UI Fallback
 
@@ -35,16 +35,16 @@ Three Backends:
     yay -S wl-longshot-git
     ```
 
-    Then you can `wl-longshot` command to open the menu.
+    Then you can run the `wl-longshot` command to open the menu.
 
 ## Dependencies
 
-- `bash` 
+- `bash`
 - `slurp` (for selecting areas)
 - `wl-clipboard` (for copying to clipboard)
 - `python`, `python-opencv`, `python-numpy` (for the stitching engine)
-- `satty`(for editing image)
-- `xdg-utils`(for previewing image through `xdg-open`)
+- `satty` (for editing image)
+- `xdg-utils` (for previewing image through `xdg-open`)
 - `wl-screenrec` or `wf-recorder` (for stream recording)
 
 ## Thanks
