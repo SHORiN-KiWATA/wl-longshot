@@ -1,6 +1,6 @@
 # wl-longshot
 
-## [中文版](README-CN) | [English](README)
+## [中文版](README-CN.md) | [English](README.md)
 
 一个适用于 Wayland 合成器的简单长截图工具。
 
@@ -38,7 +38,7 @@
 
 ## 依赖项
 
-- `bash` 
+- `bash`
 - `slurp` （用于选择截图区域）
 - `wl-clipboard` （用于将图片复制到剪贴板）
 - `python`, `python-opencv`, `python-numpy` （用于图像拼接引擎）
