@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="wl-longshot-menu"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
+FILE_BACKEND="$CONFIG_DIR/backend"
+FILE_ACTION="$CONFIG_DIR/action"
+FILE_LIVE_PREVIEW="$CONFIG_DIR/live_preview"
+FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
+FILE_GRIM_DEDUP="$CONFIG_DIR/grim_dedup"
+FILE_GRIM_FIXED_WIDTH="$CONFIG_DIR/grim_fixed_width"
+
+mkdir -p "$CONFIG_DIR"
+
+if [[ "${LANG:-}" == zh* || "${LANG:-}" == *ZH* ]]; then
+    STR_CAPTURE="截取区域"
+    STR_SETTINGS="设置"
+    STR_QUIT="退出"
+    STR_BACK="返回"
+    STR_BACKEND="后端"
+    STR_ACTION="动作"
+    STR_LIVE_PREVIEW="实时预览"
+    STR_CAPTURE_MODE="截图方式"
+    STR_GRIM_DEDUP="去重"
+    STR_GRIM_FIXED="定宽"
+    STR_SAVE="仅保存"
+    STR_PREVIEW="预览"
+    STR_EDIT="编辑"
+    STR_MANUAL="手动框选"
+    STR_AUTO="自动等高"
+    STR_ON="开"
+    STR_OFF="关"
+else
+    STR_CAPTURE="Capture Area"
+    STR_SETTINGS="Settings"
+    STR_QUIT="Quit"
+    STR_BACK="Back"
+    STR_BACKEND="Backend"
+    STR_ACTION="Action"
+    STR_LIVE_PREVIEW="Live Preview"
+    STR_CAPTURE_MODE="Capture Mode"
+    STR_GRIM_DEDUP="Deduplicate"
+    STR_GRIM_FIXED="Fixed Width"
+    STR_SAVE="Save Only"
+    STR_PREVIEW="Preview"
+    STR_EDIT="Edit"
+    STR_MANUAL="Manual"
+    STR_AUTO="Auto Fixed"
+    STR_ON="On"
+    STR_OFF="Off"
+fi
+
+die() { printf '%s: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+
+find_rust_bin() {
+    if [[ -n "${WL_LONGSHOT_BIN:-}" ]]; then
+        [[ -x "$WL_LONGSHOT_BIN" ]] || die "WL_LONGSHOT_BIN is not executable: $WL_LONGSHOT_BIN"
+        printf '%s\n' "$WL_LONGSHOT_BIN"
+        return
+    fi
+    command -v wl-longshot >/dev/null 2>&1 || die "wl-longshot command not found"
+    printf '%s\n' wl-longshot
+}
+
+RUST_BIN="$(find_rust_bin)"
+MENU_CMD="${WL_LONGSHOT_MENU:-}"
+
+get_conf() { [[ -f "$1" ]] && tr -d '\n' < "$1" || printf '%s\n' "$2"; }
+set_conf() { printf '%s\n' "$2" > "$1"; }
+
+find_menu() {
+    if [[ -n "$MENU_CMD" ]]; then printf '%s\n' "$MENU_CMD"; return; fi
+    local cmd
+    for cmd in fuzzel rofi wofi; do
+        if command -v "$cmd" >/dev/null 2>&1; then printf '%s\n' "$cmd"; return; fi
+    done
+}
+
+show_menu() {
+    local prompt="$1" items="$2" cmd
+    cmd="$(find_menu || true)"
+    if [[ "$cmd" == cli || ( -z "$cmd" && -t 0 ) ]]; then
+        local -a options=()
+        local line idx answer
+        while IFS= read -r line; do options+=("$line"); done < <(printf '%b\n' "$items")
+        printf '\n=== %s ===\n' "$prompt" >&2
+        for idx in "${!options[@]}"; do
+            printf '%d) %s\n' "$((idx + 1))" "${options[$idx]}" >&2
+        done
+        printf '> ' >&2
+        IFS= read -r answer || return 1
+        if [[ "$answer" =~ ^[0-9]+$ && "$answer" -ge 1 && "$answer" -le "${#options[@]}" ]]; then
+            printf '%s\n' "${options[$((answer - 1))]}"
+        else
+            printf '%s\n' "$answer"
+        fi
+        return
+    fi
+    if [[ -z "$cmd" ]]; then
+        die "No GUI menu found and not running in an interactive terminal"
+    fi
+    if [[ -n "$MENU_CMD" && "$cmd" != fuzzel && "$cmd" != rofi && "$cmd" != wofi ]]; then
+        printf '%b\n' "$items" | sh -c "$cmd"
+        return
+    fi
+    case "$(basename -- "$cmd")" in
+        fuzzel) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt: " ;;
+        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -p "$prompt" ;;
+        wofi) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt" ;;
+    esac
+}
+
+switch_label() { [[ "$1" == on ]] && printf '%s\n' "$STR_ON" || printf '%s\n' "$STR_OFF"; }
+action_label() { case "$1" in preview) printf '%s\n' "$STR_PREVIEW" ;; edit) printf '%s\n' "$STR_EDIT" ;; *) printf '%s\n' "$STR_SAVE" ;; esac; }
+grim_mode_label() { case "$1" in manual) printf '%s\n' "$STR_MANUAL" ;; *) printf '%s\n' "$STR_AUTO" ;; esac; }
+
+run_capture() {
+    local backend action live grim_mode grim_dedup grim_fixed
+    backend="$(get_conf "$FILE_BACKEND" grim)"
+    action="$(get_conf "$FILE_ACTION" preview)"
+    live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+    grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
+    grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
+    grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
+
+    local -a args=(--backend "$backend")
+    [[ "$live" == on ]] && args+=(--preview)
+    case "$action" in preview) args+=(--open) ;; edit) args+=(--edit) ;; esac
+    if [[ "$backend" == grim ]]; then
+        args+=(--grim-mode "$grim_mode")
+        [[ "$grim_dedup" == off ]] && args+=(--no-grim-dedup)
+        [[ "$grim_fixed" == off ]] && args+=(--no-grim-fixed-width)
+    fi
+    exec "$RUST_BIN" "${args[@]}"
+}
+
+settings_menu() {
+    while true; do
+        local backend action live grim_mode grim_dedup grim_fixed choice items
+        backend="$(get_conf "$FILE_BACKEND" grim)"
+        action="$(get_conf "$FILE_ACTION" preview)"
+        live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+        grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
+        grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
+        grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
+        items="$STR_BACK\n$STR_BACKEND [$backend]\n$STR_ACTION [$(action_label "$action")]\n$STR_LIVE_PREVIEW [$(switch_label "$live")]"
+        if [[ "$backend" == grim ]]; then
+            items="$items\n$STR_CAPTURE_MODE [$(grim_mode_label "$grim_mode")]"
+            if [[ "$grim_mode" == manual ]]; then
+                items="$items\n$STR_GRIM_FIXED [$(switch_label "$grim_fixed")]\n$STR_GRIM_DEDUP [$(switch_label "$grim_dedup")]"
+            fi
+        fi
+        choice="$(show_menu "$STR_SETTINGS" "$items" || true)"
+        case "$choice" in
+            "$STR_BACK"|"") return ;;
+            "$STR_BACKEND"*) choice="$(show_menu "$STR_BACKEND" "$STR_BACK\nframe\ngrim" || true)"; [[ "$choice" == frame || "$choice" == grim ]] && set_conf "$FILE_BACKEND" "$choice" ;;
+            "$STR_ACTION"*) choice="$(show_menu "$STR_ACTION" "$STR_BACK\n$STR_PREVIEW\n$STR_EDIT\n$STR_SAVE" || true)"; case "$choice" in "$STR_PREVIEW") set_conf "$FILE_ACTION" preview ;; "$STR_EDIT") set_conf "$FILE_ACTION" edit ;; "$STR_SAVE") set_conf "$FILE_ACTION" save ;; esac ;;
+            "$STR_LIVE_PREVIEW"*) [[ "$live" == on ]] && set_conf "$FILE_LIVE_PREVIEW" off || set_conf "$FILE_LIVE_PREVIEW" on ;;
+            "$STR_CAPTURE_MODE"*) [[ "$grim_mode" == auto ]] && set_conf "$FILE_GRIM_MODE" manual || set_conf "$FILE_GRIM_MODE" auto ;;
+            "$STR_GRIM_FIXED"*) [[ "$grim_fixed" == on ]] && set_conf "$FILE_GRIM_FIXED_WIDTH" off || set_conf "$FILE_GRIM_FIXED_WIDTH" on ;;
+            "$STR_GRIM_DEDUP"*) [[ "$grim_dedup" == on ]] && set_conf "$FILE_GRIM_DEDUP" off || set_conf "$FILE_GRIM_DEDUP" on ;;
+        esac
+    done
+}
+
+main_menu() {
+    while true; do
+        local choice
+        choice="$(show_menu "$APP_NAME" "$STR_CAPTURE\n$STR_SETTINGS\n$STR_QUIT" || true)"
+        case "$choice" in
+            "$STR_CAPTURE") run_capture ;;
+            "$STR_SETTINGS") settings_menu ;;
+            "$STR_QUIT"|"") exit 0 ;;
+        esac
+    done
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m|--menu)
+            [[ $# -ge 2 ]] || die "Missing argument for $1"
+            MENU_CMD="$2"
+            shift 2
+            ;;
+        --settings)
+            settings_menu
+            exit 0
+            ;;
+        --menu-mode)
+            main_menu
+            exit 0
+            ;;
+        "")
+            shift
+            ;;
+        --help|-h)
+            cat <<EOF
+Usage: wl-longshot-menu [--menu-mode|--settings] [-m MENU]
+
+Open the wl-longshot menu wrapper.
+
+Options:
+  -m, --menu MENU  Use fuzzel, rofi, wofi, cli, or a custom dmenu command.
+EOF
+            exit 0
+            ;;
+        *) exec "$RUST_BIN" "$@" ;;
+    esac
+done
+
+main_menu

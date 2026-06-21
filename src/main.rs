@@ -601,6 +601,49 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         )?;
     }
 
+    if config.preview && config.grim_mode == GrimMode::Auto {
+        let stop = Arc::new(AtomicBool::new(false));
+        let _stop_wake = spawn_enter_stop(stop.clone())?;
+        let frame_interval = if config.fps == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(1.0 / config.fps as f64)
+        };
+        while !stop.load(Ordering::SeqCst) {
+            let started = Instant::now();
+            let frame = grim_capture(&geometry)?;
+            let outcome = stitcher.push_frame_result(frame);
+            let accepted = outcome.accepted();
+            sync_preview_view(&mut preview_view, &stitcher, outcome, config.preview_width);
+            if accepted {
+                write_stream_update(stream.as_mut(), &stitcher)?;
+            }
+            update_preview(
+                overlay.as_mut(),
+                &stitcher,
+                config.preview_width,
+                &mut preview_view,
+            )?;
+            handle_preview_events(
+                overlay.as_mut(),
+                &stitcher,
+                config.preview_width,
+                &mut preview_view,
+            )?;
+            let elapsed = started.elapsed();
+            if elapsed < frame_interval {
+                thread::sleep(frame_interval - elapsed);
+            }
+        }
+
+        let image = stitcher
+            .full
+            .ok_or_else(|| "no frames captured from grim".to_string())?;
+        write_png(&image, output)?;
+        post_process(config, output, &image)?;
+        return Ok(());
+    }
+
     loop {
         eprintln!(
             "Press Enter to capture next, 'f' then Enter to finish, 'q' then Enter to abort."
