@@ -65,8 +65,20 @@ impl SubtitleStitcher {
                     needed: self.config.calibration_frames.max(1),
                 };
             }
-            self.region = Some(detect_region(&self.calibration, self.config.bottom_ratio));
+            let region = detect_region(&self.calibration, self.config.bottom_ratio);
+            self.region = Some(region);
+            let first_subtitle = self.calibration.iter().find_map(|frame| {
+                let strip = crop_region(frame, region);
+                let feature = subtitle_feature(&strip);
+                has_subtitle_text(&feature).then_some((strip, feature))
+            });
             self.calibration.clear();
+            if let Some((strip, feature)) = first_subtitle {
+                self.append_strip(&strip);
+                self.last_feature = Some(feature);
+                self.frames_since_add = 0;
+                return SubtitleStatus::Added;
+            }
             return SubtitleStatus::Ready;
         }
 
@@ -75,11 +87,11 @@ impl SubtitleStitcher {
         let strip = crop_region(frame, region);
         let feature = subtitle_feature(&strip);
 
-        if feature_energy(&feature) < 0.01 {
+        if !has_subtitle_text(&feature) {
             return SubtitleStatus::Duplicate;
         }
         if let Some(last) = &self.last_feature {
-            if feature_diff(last, &feature) < 0.045 {
+            if feature_diff(last, &feature) < 0.18 {
                 self.pending_feature = None;
                 self.pending_strip = None;
                 self.pending_seen = 0;
@@ -91,7 +103,7 @@ impl SubtitleStitcher {
         }
 
         if let Some(pending) = &self.pending_feature {
-            if feature_diff(pending, &feature) < 0.035 {
+            if feature_diff(pending, &feature) < 0.14 {
                 self.pending_seen += 1;
                 if self.pending_seen >= self.config.stable_frames.max(1) {
                     let strip = self.pending_strip.take().unwrap_or(strip);
@@ -127,7 +139,10 @@ impl SubtitleStitcher {
     pub fn finish(mut self) -> Option<Image> {
         if self.output.is_none() {
             if let Some(strip) = self.pending_strip.take() {
-                self.append_strip(&strip);
+                let feature = subtitle_feature(&strip);
+                if has_subtitle_text(&feature) {
+                    self.append_strip(&strip);
+                }
             }
         }
         self.output
@@ -224,11 +239,10 @@ fn row_text_score(image: &Image, y: u32) -> f32 {
         let left = gray(image.get_pixel(x - 1, y));
         let up = gray(image.get_pixel(x, prev_y));
         let edge = (g - left).abs().max((g - up).abs());
-        if g > 175.0 {
-            score += 1.0;
-        }
-        if edge > 35.0 {
-            score += 1.5;
+        if g > 175.0 && edge > 22.0 {
+            score += 2.0;
+        } else if g > 210.0 && edge > 12.0 {
+            score += 0.8;
         }
         x += step;
     }
@@ -251,24 +265,25 @@ fn crop_region(image: &Image, region: SubtitleRegion) -> Image {
 fn subtitle_feature(strip: &Image) -> Vec<f32> {
     let cols = 32;
     let rows = 12;
-    let mut feature = vec![0.0; cols * rows];
+    let mut text_counts = vec![0u32; cols * rows];
     let mut counts = vec![0u32; cols * rows];
     for y in 0..strip.height() {
         let by = ((y as usize * rows) / strip.height().max(1) as usize).min(rows - 1);
         for x in 1..strip.width() {
             let bx = ((x as usize * cols) / strip.width().max(1) as usize).min(cols - 1);
-            let g = gray(strip.get_pixel(x, y));
-            let left = gray(strip.get_pixel(x - 1, y));
-            let edge = (g - left).abs();
-            let value = if g > 185.0 { 0.7 } else { 0.0 } + if edge > 35.0 { 0.9 } else { 0.0 };
+            let value = text_pixel_score(strip, x, y);
             let index = by * cols + bx;
-            feature[index] += value;
+            if value > 0.0 {
+                text_counts[index] += 1;
+            }
             counts[index] += 1;
         }
     }
-    for (value, count) in feature.iter_mut().zip(counts) {
-        if count > 0 {
-            *value = (*value / count as f32).min(1.0);
+    let mut feature = vec![0.0; cols * rows];
+    for index in 0..feature.len() {
+        let needed = (counts[index] / 80).max(2);
+        if text_counts[index] >= needed {
+            feature[index] = 1.0;
         }
     }
     feature
@@ -278,11 +293,23 @@ fn feature_diff(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return f32::INFINITY;
     }
-    a.iter()
-        .zip(b)
-        .map(|(left, right)| (left - right).abs())
-        .sum::<f32>()
-        / a.len() as f32
+    let mut union = 0usize;
+    let mut different = 0usize;
+    for (left, right) in a.iter().zip(b) {
+        let left = *left > 0.0;
+        let right = *right > 0.0;
+        if left || right {
+            union += 1;
+        }
+        if left != right {
+            different += 1;
+        }
+    }
+    if union == 0 {
+        0.0
+    } else {
+        different as f32 / union as f32
+    }
 }
 
 fn feature_energy(feature: &[f32]) -> f32 {
@@ -290,6 +317,36 @@ fn feature_energy(feature: &[f32]) -> f32 {
         0.0
     } else {
         feature.iter().copied().sum::<f32>() / feature.len() as f32
+    }
+}
+
+fn has_subtitle_text(feature: &[f32]) -> bool {
+    let energy = feature_energy(feature);
+    let active = feature.iter().filter(|value| **value > 0.0).count();
+    energy > 0.008 && active >= 4
+}
+
+fn text_pixel_score(image: &Image, x: u32, y: u32) -> f32 {
+    let pixel = image.get_pixel(x, y);
+    let g = gray(pixel);
+    let left = gray(image.get_pixel(x.saturating_sub(1), y));
+    let up = gray(image.get_pixel(x, y.saturating_sub(1)));
+    let right = gray(image.get_pixel((x + 1).min(image.width().saturating_sub(1)), y));
+    let down = gray(image.get_pixel(x, (y + 1).min(image.height().saturating_sub(1))));
+    let edge = (g - left)
+        .abs()
+        .max((g - right).abs())
+        .max((g - up).abs())
+        .max((g - down).abs());
+    let blue_outline = pixel[2] > 110 && pixel[0] < 120 && pixel[1] < 170;
+    if g > 178.0 && edge > 24.0 {
+        1.0
+    } else if g > 215.0 && edge > 12.0 {
+        0.45
+    } else if blue_outline && edge > 22.0 {
+        0.35
+    } else {
+        0.0
     }
 }
 
@@ -319,6 +376,23 @@ fn fill_separator(image: &mut Image, y: u32, height: u32) {
 mod tests {
     use super::*;
 
+    fn subtitle_frame(bg: [u8; 3], with_text: bool, offset: u32) -> Image {
+        let mut frame = Image::from_pixel(220, 120, Rgba([bg[0], bg[1], bg[2], 255]));
+        if with_text {
+            for glyph in 0..5 {
+                let x0 = 44 + glyph * 24 + offset;
+                for y in 84..98 {
+                    for x in x0..x0 + 6 {
+                        if x < frame.width() {
+                            frame.put_pixel(x, y, Rgba([245, 245, 245, 255]));
+                        }
+                    }
+                }
+            }
+        }
+        frame
+    }
+
     #[test]
     fn detects_bottom_subtitle_region() {
         let mut frame = Image::from_pixel(200, 120, Rgba([20, 20, 20, 255]));
@@ -330,5 +404,49 @@ mod tests {
         let region = detect_region(&vec![frame; 4], 0.25);
         assert!(region.y <= 84);
         assert!(region.y + region.height >= 96);
+    }
+
+    #[test]
+    fn same_text_with_different_background_is_duplicate() {
+        let config = SubtitleConfig {
+            bottom_ratio: 0.25,
+            stable_frames: 1,
+            min_gap_frames: 1,
+            calibration_frames: 2,
+        };
+        let mut stitcher = SubtitleStitcher::new(config);
+        assert!(matches!(
+            stitcher.push_frame(&subtitle_frame([20, 20, 20], true, 0), None),
+            SubtitleStatus::Calibrating { .. }
+        ));
+        assert_eq!(
+            stitcher.push_frame(&subtitle_frame([30, 40, 50], true, 0), None),
+            SubtitleStatus::Added
+        );
+        assert_eq!(stitcher.strips(), 1);
+        assert_eq!(
+            stitcher.push_frame(&subtitle_frame([90, 40, 20], true, 0), None),
+            SubtitleStatus::Duplicate
+        );
+        assert_eq!(stitcher.strips(), 1);
+    }
+
+    #[test]
+    fn empty_gap_is_not_added() {
+        let config = SubtitleConfig {
+            bottom_ratio: 0.25,
+            stable_frames: 1,
+            min_gap_frames: 1,
+            calibration_frames: 2,
+        };
+        let mut stitcher = SubtitleStitcher::new(config);
+        let _ = stitcher.push_frame(&subtitle_frame([20, 20, 20], true, 0), None);
+        let _ = stitcher.push_frame(&subtitle_frame([30, 30, 30], true, 0), None);
+        assert_eq!(stitcher.strips(), 1);
+        assert_eq!(
+            stitcher.push_frame(&subtitle_frame([120, 80, 60], false, 0), None),
+            SubtitleStatus::Duplicate
+        );
+        assert_eq!(stitcher.strips(), 1);
     }
 }
