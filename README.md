@@ -1,8 +1,31 @@
 # wl-longshot
 
-A scrolling screenshot tool for Wayland compositors.
+## [中文版](README-CN.md) | [ENGLISH](README.md)
 
-![](./pics/showcase1.gif)
+A simple scrolling screenshot tool for Wayland compositors.
+
+## Features
+
+Three Backends:
+
+- `grim`: For tricky pages. Capture piece by piece. Stitching happens in a background worker. You can capture frames as fast as you want without waiting for stitching.
+
+    ![](pics/grim-manual.gif)
+
+    It also includes an "Auto" mode where you only draw the region once, and it will capture the same geometry on subsequent scrolls.
+
+    ![](pics/grimauto.gif)
+
+- `wl-screenrec`: Stream recording. Just select an area, scroll your mouse, and hit stop.
+
+    ![](pics/rec.gif)
+
+- `wf-recorder`: Fallback video backend for better compatibility, the same as `wl-screenrec`
+
+- UI Fallback
+
+    Uses wofi, fuzzel, or rofi for the menu. If none are installed or if run directly in a terminal, it falls back to a CLI text menu.
+
 
 ## Installation
 
@@ -11,6 +34,18 @@ A scrolling screenshot tool for Wayland compositors.
     ```
     yay -S wl-longshot-git
     ```
+
+    Then you can run the `wl-longshot` command to open the menu.
+
+## Dependencies
+
+- `bash`
+- `slurp` (for selecting areas)
+- `wl-clipboard` (for copying to clipboard)
+- `python`, `python-opencv`, `python-numpy` (for the stitching engine)
+- `satty` (for editing image)
+- `xdg-utils` (for previewing image through `xdg-open`)
+- `wl-screenrec` or `wf-recorder` (for stream recording)
 
 ## Thanks
 

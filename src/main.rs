@@ -1,5 +1,4 @@
 mod capture;
-mod subtitle;
 
 use capture::{
     FrameCapturer, OverlayConfig, PreviewConfig, PreviewEdge, PreviewOptions, Rect, parse_color,
@@ -22,7 +21,6 @@ use std::sync::{
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use subtitle::{SubtitleConfig, SubtitleStatus, SubtitleStitcher};
 
 const APP_NAME: &str = "wl-longshot";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -90,10 +88,6 @@ struct Config {
     grim_dedup: bool,
     control: ControlMode,
     menu_cmd: Option<String>,
-    subtitle: bool,
-    subtitle_bottom_ratio: f32,
-    subtitle_stable_frames: usize,
-    subtitle_min_gap_ms: u64,
 }
 
 #[derive(Debug, Default)]
@@ -292,10 +286,6 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         grim_dedup: true,
         control: ControlMode::Stdin,
         menu_cmd: None,
-        subtitle: false,
-        subtitle_bottom_ratio: 0.25,
-        subtitle_stable_frames: 2,
-        subtitle_min_gap_ms: 300,
     };
 
     let mut positional = Vec::new();
@@ -392,32 +382,6 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 index += 1;
                 config.menu_cmd = Some(take_arg(&args, index, "--menu-cmd")?);
             }
-            "--subtitle" => config.subtitle = true,
-            "--subtitle-bottom-ratio" => {
-                index += 1;
-                let value = take_arg(&args, index, "--subtitle-bottom-ratio")?;
-                config.subtitle_bottom_ratio = value
-                    .parse::<f32>()
-                    .map_err(|_| "subtitle bottom ratio must be a number".to_string())?;
-                if !(0.1..=0.6).contains(&config.subtitle_bottom_ratio) {
-                    return Err("subtitle bottom ratio must be in 0.1..0.6".to_string());
-                }
-            }
-            "--subtitle-stable-frames" => {
-                index += 1;
-                config.subtitle_stable_frames = take_arg(&args, index, "--subtitle-stable-frames")?
-                    .parse::<usize>()
-                    .map_err(|_| "subtitle stable frames must be an integer".to_string())?;
-                if !(1..=12).contains(&config.subtitle_stable_frames) {
-                    return Err("subtitle stable frames must be in 1..12".to_string());
-                }
-            }
-            "--subtitle-min-gap-ms" => {
-                index += 1;
-                config.subtitle_min_gap_ms = take_arg(&args, index, "--subtitle-min-gap-ms")?
-                    .parse::<u64>()
-                    .map_err(|_| "subtitle min gap must be an integer".to_string())?;
-            }
             "--list-backends" => {
                 println!("frame");
                 println!("grim");
@@ -443,9 +407,6 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     }
     if config.edit && config.output.as_deref() == Some("-") {
         return Err("--edit cannot be used with stdout output".to_string());
-    }
-    if config.subtitle && config.backend != Backend::Frame {
-        return Err("--subtitle currently requires --backend frame".to_string());
     }
     Ok(config)
 }
@@ -511,14 +472,6 @@ fn print_help() {
     println!("      --no-grim-dedup     Append manual grim captures without overlap dedup.");
     println!("      --control <mode>    Control mode: stdin, menu. Defaults to stdin.");
     println!("      --menu-cmd <cmd>    Menu command for --control menu.");
-    println!("      --subtitle         Capture subtitle strips and stack them vertically.");
-    println!("      --subtitle-bottom-ratio <n> Fallback bottom area ratio. Defaults to 0.25.");
-    println!(
-        "      --subtitle-stable-frames <n> Stable frames before accepting a subtitle. Defaults to 2."
-    );
-    println!(
-        "      --subtitle-min-gap-ms <n> Minimum gap between accepted subtitles. Defaults to 300."
-    );
     println!(
         "  -c, --copy              Copy result to clipboard with wl-copy. Enabled by default."
     );
@@ -624,29 +577,17 @@ fn run_frame_backend(config: &Config, output: &OutputTarget) -> Result<(), Strin
         .clone()
         .map(|dir| StreamWriter::new(dir, config.stream_keep_frames, config.stream_every))
         .transpose()?;
-    let image = if config.subtitle {
-        capture_subtitles(
-            &mut capturer,
-            stop,
-            &stop_wake,
-            config,
-            &mut preview_view,
-            stream.as_mut(),
-            config.debug_timing.then_some(&mut timing),
-        )?
-    } else {
-        capture_and_stitch(
-            &mut capturer,
-            stop,
-            &stop_wake,
-            config.debug_dir.as_deref(),
-            config.preview,
-            config.preview_width,
-            &mut preview_view,
-            stream.as_mut(),
-            config.debug_timing.then_some(&mut timing),
-        )?
-    };
+    let image = capture_and_stitch(
+        &mut capturer,
+        stop,
+        &stop_wake,
+        config.debug_dir.as_deref(),
+        config.preview,
+        config.preview_width,
+        &mut preview_view,
+        stream.as_mut(),
+        config.debug_timing.then_some(&mut timing),
+    )?;
     let write_start = Instant::now();
     write_png(&image, output)?;
     timing.write_png = write_start.elapsed();
@@ -1279,87 +1220,6 @@ fn capture_and_stitch(
         "frames={} stitched={} height={}",
         stitcher.frames,
         stitcher.accepted,
-        image.height()
-    );
-    Ok(image)
-}
-
-fn capture_subtitles(
-    capturer: &mut FrameCapturer,
-    stop: Arc<AtomicBool>,
-    stop_wake: &UnixStream,
-    config: &Config,
-    preview_view: &mut PreviewView,
-    mut stream: Option<&mut StreamWriter>,
-    mut timing: Option<&mut TimingStats>,
-) -> Result<Image, String> {
-    let subtitle_config = SubtitleConfig {
-        bottom_ratio: config.subtitle_bottom_ratio,
-        stable_frames: config.subtitle_stable_frames,
-        min_gap_frames: ((config.subtitle_min_gap_ms * config.fps as u64 + 999) / 1000).max(1)
-            as usize,
-        calibration_frames: (config.fps as usize * 2).clamp(8, 30),
-    };
-    let mut stitcher = SubtitleStitcher::new(subtitle_config);
-
-    loop {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let capture_start = Instant::now();
-        let captured = capturer
-            .capture_frame_interruptible(|| stop.load(Ordering::SeqCst), Some(stop_wake))?;
-        if let Some(timing) = timing.as_deref_mut() {
-            timing.capture += capture_start.elapsed();
-        }
-        let Some(frame) = captured else {
-            break;
-        };
-        let stitch_start = Instant::now();
-        let status = stitcher.push_frame(&frame, config.debug_dir.as_deref());
-        if let Some(timing) = timing.as_deref_mut() {
-            timing.stitch += stitch_start.elapsed();
-        }
-        if matches!(status, SubtitleStatus::Added) {
-            if let Some(image) = stitcher.image() {
-                stream
-                    .as_deref_mut()
-                    .map(|stream| stream.write_update(image, stitcher.frames(), stitcher.strips()))
-                    .transpose()?;
-            }
-        }
-        if config.preview {
-            if let Some(image) = stitcher.image() {
-                let mut preview_stitcher = Stitcher::new();
-                preview_stitcher.full = Some(image.clone());
-                preview_stitcher.frames = stitcher.frames();
-                preview_stitcher.accepted = stitcher.strips();
-                update_preview(
-                    Some(capturer),
-                    &preview_stitcher,
-                    config.preview_width,
-                    preview_view,
-                )?;
-                handle_preview_events(
-                    Some(capturer),
-                    &preview_stitcher,
-                    config.preview_width,
-                    preview_view,
-                )?;
-            }
-        }
-        capturer.sleep_frame_interval(|| stop.load(Ordering::SeqCst));
-    }
-
-    let frames = stitcher.frames();
-    let strips = stitcher.strips();
-    let image = stitcher
-        .finish()
-        .ok_or_else(|| "no subtitles captured".to_string())?;
-    eprintln!(
-        "subtitle frames={} strips={} height={}",
-        frames,
-        strips,
         image.height()
     );
     Ok(image)
