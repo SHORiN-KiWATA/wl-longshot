@@ -1,727 +1,270 @@
-#!/bin/bash
-# wl-longshot - Wayland scrolling screenshot utility
-# Copyright (C) 2024 Your Name 
-# Licensed under the GPLv3
-
+#!/usr/bin/env bash
 set -euo pipefail
 
-# --- Constants & Paths ---
 APP_NAME="wl-longshot"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
-SAVE_DIR="${XDG_PICTURES_DIR:-$HOME/Pictures}/Screenshots/longshots"
-MENU_MIN_LINES=1
-SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
-
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
+FILE_LIVE_PREVIEW="$CONFIG_DIR/live_preview"
 FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
 FILE_GRIM_DEDUP="$CONFIG_DIR/grim_dedup"
 FILE_GRIM_FIXED_WIDTH="$CONFIG_DIR/grim_fixed_width"
 
-# --- i18n 国际化支持 (全面覆盖 UI 与 CLI) ---
-if echo "${LANG:-}" | grep -iq "zh"; then
-    # UI 文本
-    STR_CAP_AREA="截取区域"
+mkdir -p "$CONFIG_DIR"
+
+if [[ "${LANG:-}" == zh* || "${LANG:-}" == *ZH* ]]; then
+    STR_CAPTURE="截取区域"
     STR_SETTINGS="设置"
     STR_QUIT="退出"
     STR_BACK="返回"
     STR_BACKEND="后端"
     STR_ACTION="动作"
-    STR_ACT_PREV="预览"
-    STR_ACT_EDIT="编辑"
-    STR_ACT_SAVE="仅保存"
-    STR_REC_STOP="停止"
-    STR_RECORDING="录制中"
+    STR_LIVE_PREVIEW="实时预览"
     STR_GRIM_MODE="Grim 模式"
-    STR_CAP_NEXT="截取下一张"
-    STR_FINISH="完成"
-    STR_ABORT="放弃"
-    STR_NOTIFY_PROC="处理中"
-    STR_NOTIFY_STITCH="正在拼接视频帧..."
-    STR_NOTIFY_SUCC="成功"
-    STR_NOTIFY_SAVED="已保存至"
-    STR_GMODE_LBL="截图方式"
-    STR_GM_MANUAL="手动框选"
-    STR_GM_AUTO="自动等高"
-    STR_DEDUP_LBL="去重"
-    STR_FIXED_WIDTH_LBL="定宽"
+    STR_GRIM_DEDUP="Grim 去重"
+    STR_GRIM_FIXED="Grim 定宽"
+    STR_SAVE="仅保存"
+    STR_OPEN="打开"
+    STR_EDIT="编辑"
+    STR_COPY="复制"
     STR_ON="开"
     STR_OFF="关"
-    
-    # CLI 输出与报错
-    STR_ERR="错误"
-    STR_ERR_DEP="缺少依赖"
-    STR_ERR_PY="缺少 Python 模块"
-    STR_ERR_CRASH="后端崩溃"
-    STR_ERR_NO_IMG="未找到输出图像"
-    STR_ERR_INV_B="无效的后端"
-    STR_ERR_NO_GUI="未找到 GUI 菜单程序且未在交互式终端中运行。"
-    STR_ERR_OPT="未知选项"
-    STR_ERR_ARG="缺少参数"
-    
-    # 帮助文档
-    STR_HELP_USAGE="用法: $APP_NAME [选项]"
-    STR_HELP_DESC="一个适用于 Wayland 混成器的智能长截图工具。"
-    STR_HELP_OPTS="选项:"
-    STR_HELP_OPT_O="  -o, --output FILE   指定输出文件路径 (跳过主菜单)"
-    STR_HELP_OPT_B="  -b, --backend NAME  强制使用指定的后端 (grim, wl-screenrec, wf-recorder)"
-    STR_HELP_OPT_M="  -m, --menu CMD      覆盖默认的菜单程序 (如 'wofi')"
-    STR_HELP_OPT_H="  -h, --help          显示此帮助信息并退出"
 else
-    # UI Text
-    STR_CAP_AREA="Capture Area"
+    STR_CAPTURE="Capture Area"
     STR_SETTINGS="Settings"
     STR_QUIT="Quit"
     STR_BACK="Back"
     STR_BACKEND="Backend"
     STR_ACTION="Action"
-    STR_ACT_PREV="Preview"
-    STR_ACT_EDIT="Edit"
-    STR_ACT_SAVE="Save Only"
-    STR_REC_STOP="Stop"
-    STR_RECORDING="Recording"
+    STR_LIVE_PREVIEW="Live Preview"
     STR_GRIM_MODE="Grim Mode"
-    STR_CAP_NEXT="Capture Next"
-    STR_FINISH="Finish"
-    STR_ABORT="Abort"
-    STR_NOTIFY_PROC="Processing"
-    STR_NOTIFY_STITCH="Stitching video frames..."
-    STR_NOTIFY_SUCC="Success"
-    STR_NOTIFY_SAVED="Saved to"
-    STR_GMODE_LBL="Capture Mode"
-    STR_GM_MANUAL="Manual"
-    STR_GM_AUTO="Auto Fixed"
-    STR_DEDUP_LBL="Deduplicate"
-    STR_FIXED_WIDTH_LBL="Fixed Width"
+    STR_GRIM_DEDUP="Grim Dedup"
+    STR_GRIM_FIXED="Grim Fixed Width"
+    STR_SAVE="Save Only"
+    STR_OPEN="Open"
+    STR_EDIT="Edit"
+    STR_COPY="Copy"
     STR_ON="On"
     STR_OFF="Off"
-    
-    # CLI Output & Errors
-    STR_ERR="error"
-    STR_ERR_DEP="missing dependency"
-    STR_ERR_PY="missing python modules"
-    STR_ERR_CRASH="backend crashed"
-    STR_ERR_NO_IMG="output image not found"
-    STR_ERR_INV_B="invalid backend"
-    STR_ERR_NO_GUI="No GUI menu found and not running in an interactive terminal."
-    STR_ERR_OPT="Unknown option"
-    STR_ERR_ARG="Missing argument for"
-    
-    # Help Document
-    STR_HELP_USAGE="Usage: $APP_NAME [OPTIONS]"
-    STR_HELP_DESC="A smart scrolling screenshot tool for Wayland compositors."
-    STR_HELP_OPTS="Options:"
-    STR_HELP_OPT_O="  -o, --output FILE   Specify the output file path (bypasses main menu)"
-    STR_HELP_OPT_B="  -b, --backend NAME  Force use a specific backend (grim, wl-screenrec, wf-recorder)"
-    STR_HELP_OPT_M="  -m, --menu CMD      Override the default dmenu-like application (e.g. 'wofi')"
-    STR_HELP_OPT_H="  -h, --help          Show this help message and exit"
 fi
 
-if [[ -f "$SCRIPT_DIR/stitcher.py" ]]; then
-    STITCHER="$SCRIPT_DIR/stitcher.py"
-else
-    STITCHER="/usr/share/$APP_NAME/stitcher.py"
-fi
-if [[ -f "$SCRIPT_DIR/drawbox.py" ]]; then
-    DRAWBOX="$SCRIPT_DIR/drawbox.py"
-else
-    DRAWBOX="/usr/share/$APP_NAME/drawbox.py"
-fi
-
-mkdir -p "$CONFIG_DIR" "$SAVE_DIR"
-
-# --- 全局安全清理机制 ---
-GRIM_TMP_DIR=""
-GRIM_FIFO=""
-WORKER_PID=""
-BOX_PID=""
-PYTHON_DRAW_SCRIPT="/tmp/wl_longshot_drawbox_$$.py"
-
-cleanup() {
-    if [[ -n "${GRIM_FIFO:-}" ]]; then 
-        echo "DONE" >"$GRIM_FIFO" 2>/dev/null || true
-    fi
-    if [[ -n "${WORKER_PID:-}" ]]; then 
-        kill "$WORKER_PID" 2>/dev/null || true
-    fi
-    if [[ -n "${BOX_PID:-}" ]]; then 
-        kill "$BOX_PID" 2>/dev/null || true
-    fi
-    if [[ -n "${GRIM_TMP_DIR:-}" ]] && [[ -d "${GRIM_TMP_DIR:-}" ]]; then 
-        rm -rf "$GRIM_TMP_DIR"
-    fi
-}
-trap cleanup EXIT SIGINT SIGTERM
-
-# --- 动态生成画框 Python 脚本 ---
-create_draw_box_script() {
-    cat << 'EOF' > "$PYTHON_DRAW_SCRIPT"
-#!/usr/bin/env python3
-import sys, os, gi, cairo
-os.environ["GDK_BACKEND"] = "wayland"
-gi.require_version("Gtk", "3.0")
-gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import Gtk, GtkLayerShell, Gdk
-
-if len(sys.argv) != 5:
-    sys.exit(1)
-global_x, global_y, w, h = map(int, sys.argv[1:5])
-
-window = Gtk.Window()
-window.set_app_paintable(True)
-window.set_decorated(False)
-window.set_resizable(False)
-
-style_context = window.get_style_context()
-found, color = style_context.lookup_color("accent_color")
-if not found:
-    found, color = style_context.lookup_color("theme_selected_bg_color")
-
-if found:
-    R, G, B = color.red, color.green, color.blue
-else:
-    R, G, B = 1.0, 1.0, 1.0
-
-css_provider = Gtk.CssProvider()
-css_provider.load_from_data(b"window { background: transparent; margin: 0px; padding: 0px; border: none; } decoration { box-shadow: none; border: none; background: transparent; }")
-Gtk.StyleContext.add_provider_for_screen(window.get_screen(), css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-
-drawing_area = Gtk.DrawingArea()
-window.add(drawing_area)
-
-if window.get_screen().get_rgba_visual():
-    window.set_visual(window.get_screen().get_rgba_visual())
-
-GtkLayerShell.init_for_window(window)
-GtkLayerShell.set_layer(window, GtkLayerShell.Layer.OVERLAY)
-GtkLayerShell.set_exclusive_zone(window, -1)
-GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.TOP, True)
-GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.BOTTOM, True)
-GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.LEFT, True)
-GtkLayerShell.set_anchor(window, GtkLayerShell.Edge.RIGHT, True)
-
-display = Gdk.Display.get_default()
-target_monitor = None
-local_x, local_y = global_x, global_y
-
-for i in range(display.get_n_monitors()):
-    monitor = display.get_monitor(i)
-    geom = monitor.get_geometry()
-    if geom.x <= global_x < geom.x + geom.width and geom.y <= global_y < geom.y + geom.height:
-        target_monitor = monitor
-        local_x = global_x - geom.x
-        local_y = global_y - geom.y
-        break
-
-if target_monitor:
-    GtkLayerShell.set_monitor(window, target_monitor)
-
-def on_draw(widget, cr):
-    cr.set_antialias(cairo.ANTIALIAS_NONE)
-    cr.set_operator(cairo.OPERATOR_SOURCE)
-    cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
-    cr.paint()
-    cr.set_operator(cairo.OPERATOR_OVER)
-
-    safe_gap = 2
-    cx = local_x - safe_gap
-    cy = local_y - safe_gap
-    cw = w + safe_gap * 2
-    ch = h + safe_gap * 2
-
-    cr.set_source_rgba(R, G, B, 0.3)
-    cr.set_line_width(2)
-    cr.rectangle(cx - 1.0, cy - 1.0, cw + 2.0, ch + 2.0)
-    cr.stroke()
-
-    cr.set_source_rgba(R, G, B, 1.0)
-    cr.set_line_width(3)
-    
-    corner_len = min(20, cw/4, ch/4)
-    bx = cx - 1.5
-    by = cy - 1.5
-    bw = cw + 3
-    bh = ch + 3
-
-    cr.move_to(bx, by + corner_len)
-    cr.line_to(bx, by)
-    cr.line_to(bx + corner_len, by)
-    cr.move_to(bx + bw - corner_len, by)
-    cr.line_to(bx + bw, by)
-    cr.line_to(bx + bw, by + corner_len)
-    cr.move_to(bx + bw, by + bh - corner_len)
-    cr.line_to(bx + bw, by + bh)
-    cr.line_to(bx + bw - corner_len, by + bh)
-    cr.move_to(bx + corner_len, by + bh)
-    cr.line_to(bx, by + bh)
-    cr.line_to(bx, by + bh - corner_len)
-    
-    cr.stroke()
-    return False
-
-drawing_area.connect("draw", on_draw)
-empty_region = cairo.Region()
-window.input_shape_combine_region(empty_region)
-window.show_all()
-Gtk.main()
-EOF
-    chmod +x "$PYTHON_DRAW_SCRIPT"
+die() {
+    printf '%s: %s\n' "$APP_NAME" "$*" >&2
+    exit 1
 }
 
-# --- Utils ---
-die() { echo "$STR_ERR: $1" >&2; exit 1; }
-notify() { command -v notify-send >/dev/null && notify-send -a "$APP_NAME" "$1" "$2"; }
-get_conf() { cat "$1" 2>/dev/null || echo "$2"; }
-set_conf() { echo "$2" > "$1"; }
-
-get_action_disp() {
-    case "$1" in
-        "preview") echo "$STR_ACT_PREV" ;;
-        "edit") echo "$STR_ACT_EDIT" ;;
-        "save") echo "$STR_ACT_SAVE" ;;
-        *) echo "$1" ;;
-    esac
+script_dir() {
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
 }
 
-get_gmode_disp() {
-    case "$1" in
-        "manual") echo "$STR_GM_MANUAL" ;;
-        "auto") echo "$STR_GM_AUTO" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-get_switch_disp() {
-    case "$1" in
-        "on") echo "$STR_ON" ;;
-        "off") echo "$STR_OFF" ;;
-        *) echo "$1" ;;
-    esac
-}
-
-# --- CLI 参数解析 ---
-show_help() {
-    cat << EOF
-$STR_HELP_USAGE
-
-$STR_HELP_DESC
-
-$STR_HELP_OPTS
-$STR_HELP_OPT_O
-$STR_HELP_OPT_B
-$STR_HELP_OPT_M
-$STR_HELP_OPT_H
-EOF
-}
-
-OUT_FILE=""
-FORCE_BACKEND=""
-FORCE_MENU=""
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        -o|--output)
-            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
-            OUT_FILE="$2"
-            shift 2
-            ;;
-        -b|--backend)
-            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
-            FORCE_BACKEND="$2"
-            shift 2
-            ;;
-        -m|--menu)
-            if [[ $# -lt 2 ]]; then die "$STR_ERR_ARG $1"; fi
-            FORCE_MENU="$2"
-            shift 2
-            ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        *)
-            die "$STR_ERR_OPT $1"
-            ;;
-    esac
-done
-
-if [[ -n "$OUT_FILE" ]]; then
-    OUT_FILE="$(realpath -m "$OUT_FILE")"
-    mkdir -p "$(dirname "$OUT_FILE")"
-fi
-
-# --- 依赖检查 ---
-check_deps() {
-    local backend="$1"
-    local deps=("slurp" "wl-copy" "python3")
-    
-    if [[ "$backend" == "grim" ]]; then
-        deps+=("grim")
-    else
-        deps+=("$backend")
-    fi
-
-    for dep in "${deps[@]}"; do
-        command -v "$dep" >/dev/null || die "$STR_ERR_DEP: $dep"
-    done
-    python3 -c "import cv2, numpy" &>/dev/null || die "$STR_ERR_PY: opencv-python, numpy"
-    python3 -c "import gi; gi.require_version('Gtk', '3.0'); gi.require_version('GtkLayerShell', '0.1')" &>/dev/null || die "$STR_ERR_PY: python-gobject, gtk-layer-shell"
-}
-
-# --- UI 菜单 ---
-show_menu() {
-    local content="$1"
-    local prompt="${2:-$APP_NAME}"
-    local lines=1
-    local rest="$content"
-
-    while [[ "$rest" == *\\n* ]]; do
-        lines=$((lines + 1))
-        rest="${rest#*\\n}"
-    done
-
-    if (( lines < MENU_MIN_LINES )); then
-        lines=$MENU_MIN_LINES
-    fi
-    
-    if [[ "$FORCE_MENU" == "fuzzel" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v fuzzel)" ]]; then
-        echo -e "$content" | fuzzel -d --anchor top --y-margin 20 --lines "$lines" -p "$prompt: " || true
-    elif [[ "$FORCE_MENU" == "rofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v rofi)" ]]; then
-        echo -e "$content" | rofi -dmenu -disable-history -p "$prompt" || true
-    elif [[ "$FORCE_MENU" == "wofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v wofi)" ]]; then
-        echo -e "$content" | wofi -d -i -p "$prompt" --lines "$lines" --cache-file /dev/null || true
-    elif [[ -n "$FORCE_MENU" && "$FORCE_MENU" != "cli" ]]; then
-        echo -e "$content" | eval "$FORCE_MENU -p '$prompt: '" || true
-    elif [[ "$FORCE_MENU" == "cli" || -t 0 ]]; then
-        echo -e "\n=== $prompt ===" >&2
-        mapfile -t options <<< "$(echo -e "$content")"
-        local i=1
-        for opt in "${options[@]}"; do
-            echo "$i) $opt" >&2
-            i=$((i + 1))
-        done
-        local ans
-        read -r -p "> " ans || true
-        if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans > 0 && ans <= ${#options[@]} )); then
-            echo "${options[$((ans-1))]}"
+find_rust_bin() {
+    local dir
+    dir="$(script_dir)"
+    local candidates=(
+        "${WL_LONGSHOT_BIN:-}"
+        "$dir/wl-longshot-rs"
+        "/usr/lib/wl-longshot/wl-longshot-rs"
+        "$dir/../target/release/wl-longshot"
+        "$dir/../target/debug/wl-longshot"
+    )
+    local candidate
+    for candidate in "${candidates[@]}"; do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return
         fi
-        return 0
+    done
+    die "Rust backend not found. Set WL_LONGSHOT_BIN or install /usr/lib/wl-longshot/wl-longshot-rs."
+}
+
+RUST_BIN="$(find_rust_bin)"
+MENU_CMD="${WL_LONGSHOT_MENU:-}"
+
+get_conf() {
+    local file="$1"
+    local default="$2"
+    if [[ -f "$file" ]]; then
+        tr -d '\n' < "$file"
     else
-        die "$STR_ERR_NO_GUI"
+        printf '%s\n' "$default"
     fi
 }
 
-show_stop_menu() {
-    if [[ "$FORCE_MENU" == "fuzzel" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v fuzzel)" ]]; then
-        echo "$STR_REC_STOP" | fuzzel -d --anchor top --y-margin 20 --lines 1 --width 12 -p "$STR_RECORDING " || true
-    elif [[ "$FORCE_MENU" == "rofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v rofi)" ]]; then
-        echo "$STR_REC_STOP" | rofi -dmenu -disable-history -p "$STR_RECORDING" -location 2 -yoffset 20 -theme-str 'window {width: 250px;}' -l 1 || true
-    elif [[ "$FORCE_MENU" == "wofi" ]] || [[ -z "$FORCE_MENU" && -x "$(command -v wofi)" ]]; then
-        echo "$STR_REC_STOP" | wofi -d -i -p "$STR_RECORDING" -l top -y 20 -W 250 -H 45 --lines 1 --cache-file /dev/null || true
-    elif [[ -n "$FORCE_MENU" && "$FORCE_MENU" != "cli" ]]; then
-        echo "$STR_REC_STOP" | eval "$FORCE_MENU -p '$STR_RECORDING '" || true
-    elif [[ "$FORCE_MENU" == "cli" || -t 0 ]]; then
-        echo -e "\n=== $STR_RECORDING ===" >&2
-        read -r -p "Press [Enter] to $STR_REC_STOP: " _ || true
-        echo "$STR_REC_STOP"
-    else
-        die "$STR_ERR_NO_GUI"
-    fi
+set_conf() {
+    local file="$1"
+    local value="$2"
+    printf '%s\n' "$value" > "$file"
 }
 
-# --- 后处理 ---
-post_process() {
-    local out_img="$1"
-    [[ ! -f "$out_img" ]] && die "$STR_ERR_NO_IMG"
-    
-    wl-copy < "$out_img"
-    notify "$STR_NOTIFY_SUCC" "$STR_NOTIFY_SAVED $(basename "$out_img")"
-    
-    local action
-    action=$(get_conf "$FILE_ACTION" "preview")
-    case "$action" in
-        "preview") 
-            if command -v xdg-open >/dev/null; then
-                xdg-open "$out_img" &>/dev/null &
-            elif command -v imv >/dev/null; then
-                imv "$out_img"
-            fi
-            ;;
-        "edit")    
-            command -v satty >/dev/null && satty -f "$out_img" 
-            ;;
-        "save")    
-            ;;
+find_menu() {
+    if [[ -n "$MENU_CMD" ]]; then
+        printf '%s\n' "$MENU_CMD"
+        return
+    fi
+    local cmd
+    for cmd in fuzzel rofi wofi; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            printf '%s\n' "$cmd"
+            return
+        fi
+    done
+}
+
+show_menu() {
+    local prompt="$1"
+    local items="$2"
+    local cmd
+    cmd="$(find_menu || true)"
+    if [[ -z "$cmd" ]]; then
+        printf '%b\n' "$items" >&2
+        printf '> ' >&2
+        local line
+        IFS= read -r line || return 1
+        printf '%s\n' "$line"
+        return
+    fi
+    case "$(basename -- "$cmd")" in
+        fuzzel) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt: " ;;
+        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -p "$prompt" ;;
+        wofi) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt" ;;
+        *) printf '%b\n' "$items" | sh -c "$cmd" ;;
     esac
 }
 
-get_output_path() {
-    if [[ -n "$OUT_FILE" ]]; then
-        echo "$OUT_FILE"
-    else
-        echo "$SAVE_DIR/longshot_$(date +%Y%m%d_%H%M%S).png"
+switch_label() {
+    case "$1" in
+        on) printf '%s\n' "$STR_ON" ;;
+        *) printf '%s\n' "$STR_OFF" ;;
+    esac
+}
+
+action_label() {
+    case "$1" in
+        open) printf '%s\n' "$STR_OPEN" ;;
+        edit) printf '%s\n' "$STR_EDIT" ;;
+        copy) printf '%s\n' "$STR_COPY" ;;
+        *) printf '%s\n' "$STR_SAVE" ;;
+    esac
+}
+
+capture_args() {
+    local backend action live grim_mode grim_dedup grim_fixed
+    backend="$(get_conf "$FILE_BACKEND" frame)"
+    action="$(get_conf "$FILE_ACTION" save)"
+    live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+    grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
+    grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
+    grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
+
+    printf '%s\0%s\0' --backend "$backend"
+    [[ "$live" == on ]] && printf '%s\0' --preview
+    case "$action" in
+        open) printf '%s\0' --open ;;
+        edit) printf '%s\0' --edit ;;
+        copy) printf '%s\0' --copy ;;
+    esac
+    if [[ "$backend" == grim ]]; then
+        printf '%s\0%s\0' --grim-mode "$grim_mode"
+        [[ "$grim_dedup" == off ]] && printf '%s\0' --no-grim-dedup
+        [[ "$grim_fixed" == off ]] && printf '%s\0' --no-grim-fixed-width
     fi
 }
 
-# --- 录屏后端 ---
-run_video() {
-    local backend="$1"
-    local out_img
-    out_img=$(get_output_path)
-    
-    local geo
-    geo=$(slurp) || exit 0
-    [[ -z "$geo" ]] && exit 0
-
-    create_draw_box_script
-    IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
-    python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
-    BOX_PID=$!
-
-    sleep 0.3
-
-    local tmp_vid="/tmp/wl_longshot_$$.mp4"
-    local pid
-
-    if [[ "$backend" == "wl-screenrec" ]]; then
-        wl-screenrec -g "$geo" -f "$tmp_vid" &>/dev/null &
-    else
-        wf-recorder -g "$geo" -f "$tmp_vid" -c libx264 -p crf=0 -p preset=ultrafast -p pixel_format=yuv420p &>/dev/null &
-    fi
-    pid=$!
-
-    sleep 0.5
-    kill -0 $pid 2>/dev/null || die "$STR_ERR_CRASH: $backend"
-
-    show_stop_menu >/dev/null || true
-    
-    kill -SIGINT $pid || true
-    wait $pid 2>/dev/null || true
-
-    if [[ -n "${BOX_PID:-}" ]]; then 
-        kill "$BOX_PID" 2>/dev/null || true
-        BOX_PID=""
-    fi
-
-    if [[ -f "$tmp_vid" ]]; then
-        notify "$STR_NOTIFY_PROC" "$STR_NOTIFY_STITCH"
-        python3 "$STITCHER" video --in "$tmp_vid" --out "$out_img"
-        rm -f "$tmp_vid"
-        post_process "$out_img"
-    fi
+run_capture() {
+    local -a args=()
+    while IFS= read -r -d '' arg; do
+        args+=("$arg")
+    done < <(capture_args)
+    exec "$RUST_BIN" "${args[@]}"
 }
 
-# --- 截图后端 (Grim 异步) ---
-run_grim() {
-    local out_img
-    out_img=$(get_output_path)
-    
-    local gmode
-    gmode=$(get_conf "$FILE_GRIM_MODE" "auto")
-    local grim_dedup
-    grim_dedup=$(get_conf "$FILE_GRIM_DEDUP" "on")
-    local grim_fixed_width
-    grim_fixed_width=$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")
-    
-    GRIM_TMP_DIR="/tmp/wl_longshot_$$"
-    GRIM_FIFO="$GRIM_TMP_DIR/fifo"
-    local base_img="$GRIM_TMP_DIR/base.png"
-    
-    mkdir -p "$GRIM_TMP_DIR"
-
-    local geo
-    geo=$(slurp) || exit 0
-    [[ -z "$geo" ]] && exit 0
-    
-    IFS=', x' read -r fix_x fix_y fix_w fix_h <<< "$geo"
-    
-    if [[ "$gmode" == "auto" ]]; then
-        create_draw_box_script
-        python3 "$DRAWBOX" "$fix_x" "$fix_y" "$fix_w" "$fix_h" &
-        BOX_PID=$!
-    fi
-
-    grim -g "$geo" "$base_img"
-
-    mkfifo "$GRIM_FIFO"
-    exec 3<> "$GRIM_FIFO"
-
-    (
-        while read -r task <&3; do
-            [[ "$task" == "DONE" ]] && break
-            local stitch_args=(incremental --base "$base_img" --next "$task" --out "$base_img")
-            if [[ "$gmode" == "manual" && "$grim_fixed_width" == "off" ]]; then
-                stitch_args+=(--keep-widths)
-            fi
-            if [[ "$gmode" == "manual" && "$grim_dedup" == "off" ]]; then
-                stitch_args+=(--no-dedup)
-            fi
-            python3 "$STITCHER" "${stitch_args[@]}"
-        done
-    ) &
-    WORKER_PID=$!
-
-    local idx=0
+settings_menu() {
     while true; do
-        local choice
-        choice=$(show_menu "$STR_CAP_NEXT\n$STR_FINISH\n$STR_ABORT" "$STR_GRIM_MODE")
-        
-        if [[ -z "$choice" ]]; then break; fi
-        
+        local backend action live grim_mode grim_dedup grim_fixed choice items
+        backend="$(get_conf "$FILE_BACKEND" frame)"
+        action="$(get_conf "$FILE_ACTION" save)"
+        live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+        grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
+        grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
+        grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
+        items="$STR_BACK\n$STR_BACKEND [$backend]\n$STR_ACTION [$(action_label "$action")]\n$STR_LIVE_PREVIEW [$(switch_label "$live")]"
+        if [[ "$backend" == grim ]]; then
+            items="$items\n$STR_GRIM_MODE [$grim_mode]\n$STR_GRIM_FIXED [$(switch_label "$grim_fixed")]\n$STR_GRIM_DEDUP [$(switch_label "$grim_dedup")]"
+        fi
+        choice="$(show_menu "$STR_SETTINGS" "$items" || true)"
         case "$choice" in
-            *"$STR_CAP_NEXT"*)
-                sleep 0.2
-                local final_geo
-                
-                if [[ "$gmode" == "auto" ]]; then
-                    final_geo="$geo"
-                else
-                    local next_geo
-                    next_geo=$(slurp) || continue
-                    [[ -z "$next_geo" ]] && continue
-
-                    if [[ "$grim_fixed_width" == "off" ]]; then
-                        final_geo="$next_geo"
-                    else
-                        IFS=', x' read -r _tx new_y _tw new_h <<< "$next_geo"
-                        final_geo="${fix_x},${new_y} ${fix_w}x${new_h}"
-                    fi
-                fi
-                
-                local next_img="$GRIM_TMP_DIR/next_$idx.png"
-                grim -g "$final_geo" "$next_img"
-                
-                echo "$next_img" >&3 2>/dev/null || true
-                idx=$((idx + 1))
+            "$STR_BACK"|"") return ;;
+            "$STR_BACKEND"*)
+                choice="$(show_menu "$STR_BACKEND" "$STR_BACK\nframe\ngrim" || true)"
+                case "$choice" in frame|grim) set_conf "$FILE_BACKEND" "$choice" ;; esac
                 ;;
-            *"$STR_FINISH"*) break ;;
-            *"$STR_ABORT"*) exit 0 ;;
+            "$STR_ACTION"*)
+                choice="$(show_menu "$STR_ACTION" "$STR_BACK\n$STR_SAVE\n$STR_OPEN\n$STR_EDIT\n$STR_COPY" || true)"
+                case "$choice" in
+                    "$STR_SAVE") set_conf "$FILE_ACTION" save ;;
+                    "$STR_OPEN") set_conf "$FILE_ACTION" open ;;
+                    "$STR_EDIT") set_conf "$FILE_ACTION" edit ;;
+                    "$STR_COPY") set_conf "$FILE_ACTION" copy ;;
+                esac
+                ;;
+            "$STR_LIVE_PREVIEW"*) [[ "$live" == on ]] && set_conf "$FILE_LIVE_PREVIEW" off || set_conf "$FILE_LIVE_PREVIEW" on ;;
+            "$STR_GRIM_MODE"*) [[ "$grim_mode" == auto ]] && set_conf "$FILE_GRIM_MODE" manual || set_conf "$FILE_GRIM_MODE" auto ;;
+            "$STR_GRIM_FIXED"*) [[ "$grim_fixed" == on ]] && set_conf "$FILE_GRIM_FIXED_WIDTH" off || set_conf "$FILE_GRIM_FIXED_WIDTH" on ;;
+            "$STR_GRIM_DEDUP"*) [[ "$grim_dedup" == on ]] && set_conf "$FILE_GRIM_DEDUP" off || set_conf "$FILE_GRIM_DEDUP" on ;;
         esac
     done
-
-    echo "DONE" >&3 2>/dev/null || true
-    wait "$WORKER_PID" 2>/dev/null || true
-    exec 3>&-
-
-    if [[ -n "${BOX_PID:-}" ]]; then 
-        kill "$BOX_PID" 2>/dev/null || true
-        BOX_PID=""
-    fi
-
-    if [[ -f "$base_img" ]]; then
-        mv "$base_img" "$out_img"
-        post_process "$out_img"
-    fi
-
-    rm -rf "$GRIM_TMP_DIR"
-    GRIM_TMP_DIR=""
-    GRIM_FIFO=""
-    WORKER_PID=""
 }
 
-# --- 启动逻辑 ---
-backend="${FORCE_BACKEND:-$(get_conf "$FILE_BACKEND" "grim")}"
-check_deps "$backend"
+main_menu() {
+    while true; do
+        local choice
+        choice="$(show_menu "$APP_NAME" "$STR_CAPTURE\n$STR_SETTINGS\n$STR_QUIT" || true)"
+        case "$choice" in
+            "$STR_CAPTURE") run_capture ;;
+            "$STR_SETTINGS") settings_menu ;;
+            "$STR_QUIT"|"") exit 0 ;;
+        esac
+    done
+}
 
-if [[ -n "$OUT_FILE" ]] || [[ -n "$FORCE_BACKEND" ]]; then
-    case "$backend" in
-        "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
-        "grim") run_grim ;;
-        *) die "$STR_ERR_INV_B: $backend" ;;
-    esac
-    exit 0
-fi
-
-while true; do
-    choice=$(show_menu "$STR_CAP_AREA\n$STR_SETTINGS\n$STR_QUIT" "$APP_NAME")
-    
-    if [[ -z "$choice" ]]; then exit 0; fi
-
-    case "$choice" in
-        *"$STR_CAP_AREA"*)
-            case "$backend" in
-                "wl-screenrec"|"wf-recorder") run_video "$backend" ;;
-                "grim") run_grim ;;
-            esac
-            break
+mode="capture"
+forward=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --menu-mode) mode="menu" ;;
+        --settings) mode="settings" ;;
+        -m|--menu)
+            shift || die "missing argument for --menu"
+            MENU_CMD="$1"
             ;;
-        *"$STR_SETTINGS"*)
-            while true; do
-                b_lbl=$(get_conf "$FILE_BACKEND" "grim")
-                a_raw=$(get_conf "$FILE_ACTION" "preview")
-                a_lbl=$(get_action_disp "$a_raw")
-                
-                menu_content="$STR_BACK\n$STR_BACKEND [$b_lbl]\n$STR_ACTION [$a_lbl]"
-                
-                if [[ "$b_lbl" == "grim" ]]; then
-                    g_raw=$(get_conf "$FILE_GRIM_MODE" "auto")
-                    g_lbl=$(get_gmode_disp "$g_raw")
-                    menu_content="$menu_content\n$STR_GMODE_LBL [$g_lbl]"
+        --wrapper-help)
+            cat <<EOF
+Usage: wl-longshot [Rust options]
+       wl-longshot --menu-mode
+       wl-longshot --settings
 
-                    if [[ "$g_raw" == "manual" ]]; then
-                        w_raw=$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")
-                        w_lbl=$(get_switch_disp "$w_raw")
-                        d_raw=$(get_conf "$FILE_GRIM_DEDUP" "on")
-                        d_lbl=$(get_switch_disp "$d_raw")
-                        menu_content="$menu_content\n$STR_FIXED_WIDTH_LBL [$w_lbl]"
-                        menu_content="$menu_content\n$STR_DEDUP_LBL [$d_lbl]"
-                    fi
-                fi
-                
-                s_choice=$(show_menu "$menu_content" "$STR_SETTINGS")
-                [[ -z "$s_choice" ]] && break
+Wrapper options:
+  --menu-mode        Open capture/settings menu.
+  --settings         Open settings menu.
+  -m, --menu CMD     Override menu command.
+  --wrapper-help     Show wrapper help.
 
-                case "$s_choice" in
-                    *"$STR_BACK"*) break ;;
-                    
-                    *"$STR_BACKEND "*)
-                        b_choice=$(show_menu "$STR_BACK\nwl-screenrec\nwf-recorder\ngrim" "$STR_BACKEND")
-                        case "$b_choice" in
-                            *"wl-screenrec"*) set_conf "$FILE_BACKEND" "wl-screenrec" ;;
-                            *"wf-recorder"*)  set_conf "$FILE_BACKEND" "wf-recorder" ;;
-                            *"grim"*)         set_conf "$FILE_BACKEND" "grim" ;;
-                            *"$STR_BACK"*|"") ;;
-                        esac
-                        backend=$(get_conf "$FILE_BACKEND")
-                        check_deps "$backend"
-                        ;;
-                        
-                    *"$STR_ACTION "*)
-                        a_choice=$(show_menu "$STR_BACK\n$STR_ACT_PREV\n$STR_ACT_EDIT\n$STR_ACT_SAVE" "$STR_ACTION")
-                        case "$a_choice" in
-                            *"$STR_ACT_PREV"*) set_conf "$FILE_ACTION" "preview" ;;
-                            *"$STR_ACT_EDIT"*) set_conf "$FILE_ACTION" "edit" ;;
-                            *"$STR_ACT_SAVE"*) set_conf "$FILE_ACTION" "save" ;;
-                            *"$STR_BACK"*|"")  ;;
-                        esac
-                        ;;
-                        
-                    *"$STR_GMODE_LBL "*)
-                        if [[ "$(get_conf "$FILE_GRIM_MODE" "auto")" == "manual" ]]; then
-                            set_conf "$FILE_GRIM_MODE" "auto"
-                        else
-                            set_conf "$FILE_GRIM_MODE" "manual"
-                        fi
-                        ;;
-
-                    *"$STR_FIXED_WIDTH_LBL "*)
-                        if [[ "$(get_conf "$FILE_GRIM_FIXED_WIDTH" "on")" == "on" ]]; then
-                            set_conf "$FILE_GRIM_FIXED_WIDTH" "off"
-                        else
-                            set_conf "$FILE_GRIM_FIXED_WIDTH" "on"
-                        fi
-                        ;;
-
-                    *"$STR_DEDUP_LBL "*)
-                        if [[ "$(get_conf "$FILE_GRIM_DEDUP" "on")" == "on" ]]; then
-                            set_conf "$FILE_GRIM_DEDUP" "off"
-                        else
-                            set_conf "$FILE_GRIM_DEDUP" "on"
-                        fi
-                        ;;
-                esac
-            done
+All other options are passed directly to the Rust wl-longshot binary.
+EOF
+            exit 0
             ;;
-        *"$STR_QUIT"*) exit 0 ;;
+        *) forward+=("$1") ;;
     esac
+    shift
 done
+
+case "$mode" in
+    menu) main_menu ;;
+    settings) settings_menu ;;
+    capture)
+        if [[ ${#forward[@]} -gt 0 ]]; then
+            exec "$RUST_BIN" "${forward[@]}"
+        fi
+        run_capture
+        ;;
+esac
