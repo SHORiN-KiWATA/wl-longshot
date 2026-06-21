@@ -1316,14 +1316,18 @@ fn sync_preview_view(
     outcome: StitchResult,
     _preview_width: u32,
 ) {
-    let moved = matches!(
+    let accepted_or_seen = matches!(
+        outcome.status,
+        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+    );
+    let should_follow = matches!(
         outcome.status,
         StitchStatus::FirstFrame | StitchStatus::Appended
     );
     if outcome.status == StitchStatus::FirstFrame {
         view.capture_pos = 0;
         view.capture_len = outcome.frame_len;
-    } else if outcome.status == StitchStatus::Appended {
+    } else if accepted_or_seen {
         view.capture_pos = if outcome.edge == Some(Edge::Start) {
             0
         } else {
@@ -1331,7 +1335,7 @@ fn sync_preview_view(
         };
         view.capture_len = outcome.frame_len;
     }
-    if !view.following && moved {
+    if !view.following && should_follow {
         view.following = true;
         view.scrub_pos = view.capture_pos;
         view.frame_len = outcome.frame_len;
@@ -1344,10 +1348,7 @@ fn sync_preview_view(
         }
         return;
     }
-    if !matches!(
-        outcome.status,
-        StitchStatus::FirstFrame | StitchStatus::Appended
-    ) {
+    if !should_follow {
         return;
     }
     let Some(full) = stitcher.full.as_ref() else {
@@ -2431,6 +2432,36 @@ mod tests {
         let base = edge_pattern_frame(0, 80);
         let next = edge_pattern_frame(50, 80);
         assert_eq!(edge_overlap_tail_head(&base, &next, 12), Some(30));
+    }
+
+    #[test]
+    fn no_progress_updates_capture_indicator_without_forcing_follow() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(0, 80)).status,
+            StitchStatus::FirstFrame
+        );
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(60, 80)).status,
+            StitchStatus::Appended
+        );
+
+        let mut view = PreviewView::default();
+        sync_preview_view(
+            &mut view,
+            &stitcher,
+            StitchResult {
+                status: StitchStatus::NoProgress,
+                added: 0,
+                edge: None,
+                position: 30,
+                frame_len: 80,
+            },
+            320,
+        );
+        assert_eq!(view.capture_pos, 30);
+        assert_eq!(view.capture_len, 80);
+        assert_eq!(view.scrub_pos, 0);
     }
 
     #[test]
