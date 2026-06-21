@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="wl-longshot-menu"
+APP_NAME="wl-longshot"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
 MENU_MIN_LINES=1
 FILE_BACKEND="$CONFIG_DIR/backend"
@@ -28,7 +28,7 @@ if [[ "${LANG:-}" == zh* || "${LANG:-}" == *ZH* ]]; then
     STR_PREVIEW="预览"
     STR_EDIT="编辑"
     STR_MANUAL="手动框选"
-    STR_AUTO="自动等高"
+    STR_AUTO="自动"
     STR_ON="开"
     STR_OFF="关"
 else
@@ -46,7 +46,7 @@ else
     STR_PREVIEW="Preview"
     STR_EDIT="Edit"
     STR_MANUAL="Manual"
-    STR_AUTO="Auto Fixed"
+    STR_AUTO="Auto"
     STR_ON="On"
     STR_OFF="Off"
 fi
@@ -113,9 +113,9 @@ show_menu() {
         return
     fi
     case "$(basename -- "$cmd")" in
-        fuzzel) printf '%b\n' "$items" | "$cmd" -d --anchor top --y-margin 20 --lines "$lines" -p "$prompt: " ;;
-        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -disable-history -p "$prompt" ;;
-        wofi) printf '%b\n' "$items" | "$cmd" -d -i -p "$prompt" --lines "$lines" --cache-file /dev/null ;;
+        fuzzel) printf '%b\n' "$items" | "$cmd" -d --anchor top --y-margin 20 --lines "$lines" --width 20 -p "$prompt: " ;;
+        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -disable-history -p "$prompt" -theme-str 'window {width: 230px;}' ;;
+        wofi) printf '%b\n' "$items" | "$cmd" -d -i -p "$prompt" --lines "$lines" -W 230 --cache-file /dev/null ;;
     esac
 }
 

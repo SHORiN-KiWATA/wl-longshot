@@ -55,6 +55,16 @@ enum GrimAction {
     Abort,
 }
 
+#[derive(Clone, Copy)]
+struct UiText {
+    capture_next: &'static str,
+    finish: &'static str,
+    abort: &'static str,
+    stop: &'static str,
+    recording: &'static str,
+    grim_mode: &'static str,
+}
+
 #[derive(Debug)]
 struct Config {
     output: Option<String>,
@@ -642,39 +652,94 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             &mut preview_view,
         )?;
     }
-    let action_rx = spawn_grim_action_controller(config)?;
+
+    if config.grim_mode == GrimMode::Auto {
+        let stop = Arc::new(AtomicBool::new(false));
+        let _stop_wake = spawn_stop_controller(stop.clone(), config)?;
+        let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
+        while !stop.load(Ordering::SeqCst) {
+            let started = Instant::now();
+            let frame = grim_capture(&geometry)?;
+            let outcome = stitcher.push_frame_result(frame);
+            let accepted = outcome.accepted();
+            if config.preview {
+                sync_preview_view(&mut preview_view, &stitcher, outcome, config.preview_width);
+            }
+            if accepted {
+                write_stream_update(stream.as_mut(), &stitcher)?;
+            }
+            if config.preview {
+                update_preview(
+                    overlay.as_mut(),
+                    &stitcher,
+                    config.preview_width,
+                    &mut preview_view,
+                )?;
+                handle_preview_events(
+                    overlay.as_mut(),
+                    &stitcher,
+                    config.preview_width,
+                    &mut preview_view,
+                )?;
+            }
+            let elapsed = started.elapsed();
+            if elapsed < frame_interval {
+                thread::sleep(frame_interval - elapsed);
+            }
+        }
+
+        let image = stitcher
+            .full
+            .ok_or_else(|| "no frames captured from grim".to_string())?;
+        write_png(&image, output)?;
+        post_process(config, output, &image)?;
+        return Ok(());
+    }
+
+    let action_rx = if config.control == ControlMode::Stdin {
+        Some(spawn_grim_stdin_action_controller())
+    } else {
+        None
+    };
+    let menu_cmd = if config.control == ControlMode::Menu {
+        Some(resolve_menu_cmd(config.menu_cmd.as_deref())?)
+    } else {
+        None
+    };
 
     loop {
-        match wait_for_grim_action(
-            &action_rx,
-            overlay.as_mut(),
-            &stitcher,
-            config.preview,
-            config.preview_width,
-            &mut preview_view,
-        )? {
+        let action = if let Some(rx) = &action_rx {
+            wait_for_grim_action(
+                rx,
+                overlay.as_mut(),
+                &stitcher,
+                config.preview,
+                config.preview_width,
+                &mut preview_view,
+            )?
+        } else if let Some(menu_cmd) = &menu_cmd {
+            menu_select_grim_action(menu_cmd)?
+        } else {
+            None
+        };
+        match action {
             Some(GrimAction::Next) => {}
             Some(GrimAction::Finish) | None => break,
             Some(GrimAction::Abort) => return Ok(()),
         }
 
-        let next_geometry = match config.grim_mode {
-            GrimMode::Auto => geometry.clone(),
-            GrimMode::Manual => {
-                let selected = run_slurp()?;
-                if selected.trim().is_empty() {
-                    continue;
-                }
-                if config.grim_fixed_width {
-                    let next = Rect::parse(&selected)?;
-                    format!(
-                        "{},{} {}x{}",
-                        base_rect.x, next.y, base_rect.width, next.height
-                    )
-                } else {
-                    selected
-                }
-            }
+        let selected = run_slurp()?;
+        if selected.trim().is_empty() {
+            continue;
+        }
+        let next_geometry = if config.grim_fixed_width {
+            let next = Rect::parse(&selected)?;
+            format!(
+                "{},{} {}x{}",
+                base_rect.x, next.y, base_rect.width, next.height
+            )
+        } else {
+            selected
         };
 
         let frame = grim_capture(&next_geometry)?;
@@ -808,16 +873,10 @@ fn spawn_stop_controller(stop: Arc<AtomicBool>, config: &Config) -> Result<UnixS
     Ok(read_end)
 }
 
-fn spawn_grim_action_controller(config: &Config) -> Result<mpsc::Receiver<GrimAction>, String> {
-    let control = config.control;
-    let menu_cmd = if control == ControlMode::Menu {
-        Some(resolve_menu_cmd(config.menu_cmd.as_deref())?)
-    } else {
-        None
-    };
+fn spawn_grim_stdin_action_controller() -> mpsc::Receiver<GrimAction> {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || match control {
-        ControlMode::Stdin => loop {
+    thread::spawn(move || {
+        loop {
             eprintln!(
                 "Press Enter to capture next, 'f' then Enter to finish, 'q' then Enter to abort."
             );
@@ -839,28 +898,9 @@ fn spawn_grim_action_controller(config: &Config) -> Result<mpsc::Receiver<GrimAc
             if tx.send(action).is_err() || done {
                 break;
             }
-        },
-        ControlMode::Menu => {
-            let menu_cmd = menu_cmd.expect("menu command was resolved");
-            loop {
-                match menu_select_grim_action(&menu_cmd) {
-                    Ok(Some(action)) => {
-                        let done = !matches!(action, GrimAction::Next);
-                        if tx.send(action).is_err() || done {
-                            break;
-                        }
-                    }
-                    Ok(None) => thread::sleep(Duration::from_millis(100)),
-                    Err(error) => {
-                        eprintln!("error: {error}");
-                        let _ = tx.send(GrimAction::Finish);
-                        break;
-                    }
-                }
-            }
         }
     });
-    Ok(rx)
+    rx
 }
 
 fn wait_for_grim_action(
@@ -908,23 +948,48 @@ fn resolve_menu_cmd(menu_cmd: Option<&str>) -> Result<String, String> {
 }
 
 fn menu_select_stop(menu_cmd: &str) -> Result<bool, String> {
-    let choice = menu_select(menu_cmd, "Recording", &["Stop"], true)?;
-    Ok(choice.as_deref() == Some("Stop"))
+    let ui = ui_text();
+    let choice = menu_select(menu_cmd, ui.recording, &[ui.stop], true)?;
+    Ok(choice.as_deref() == Some(ui.stop))
 }
 
 fn menu_select_grim_action(menu_cmd: &str) -> Result<Option<GrimAction>, String> {
+    let ui = ui_text();
     let choice = menu_select(
         menu_cmd,
-        "Grim Mode",
-        &["Capture Next", "Finish", "Abort"],
+        ui.grim_mode,
+        &[ui.capture_next, ui.finish, ui.abort],
         false,
     )?;
     Ok(match choice.as_deref() {
-        Some("Capture Next") => Some(GrimAction::Next),
-        Some("Finish") => Some(GrimAction::Finish),
-        Some("Abort") => Some(GrimAction::Abort),
+        Some(value) if value == ui.capture_next => Some(GrimAction::Next),
+        Some(value) if value == ui.finish => Some(GrimAction::Finish),
+        Some(value) if value == ui.abort => Some(GrimAction::Abort),
         _ => None,
     })
+}
+
+fn ui_text() -> UiText {
+    let lang = env::var("LANG").unwrap_or_default().to_ascii_lowercase();
+    if lang.contains("zh") {
+        UiText {
+            capture_next: "截取下一张",
+            finish: "完成",
+            abort: "放弃",
+            stop: "停止",
+            recording: "录制中",
+            grim_mode: "Grim 模式",
+        }
+    } else {
+        UiText {
+            capture_next: "Capture Next",
+            finish: "Finish",
+            abort: "Abort",
+            stop: "Stop",
+            recording: "Recording",
+            grim_mode: "Grim Mode",
+        }
+    }
 }
 
 fn menu_select(
@@ -940,9 +1005,9 @@ fn menu_select(
         let mut command = Command::new("fuzzel");
         command.args(["-d", "--anchor", "top", "--y-margin", "20"]);
         if stop_menu {
-            command.args(["--lines", "1", "--width", "12", "-p", "Recording "]);
+            command.args(["--lines", "1", "--width", "12", "-p", &format!("{prompt} ")]);
         } else {
-            command.args(["--lines", &lines, "-p", &prompt_colon]);
+            command.args(["--lines", &lines, "--width", "20", "-p", &prompt_colon]);
         }
         command
     } else if menu_cmd == "rofi" {
@@ -959,6 +1024,8 @@ fn menu_select(
                 "-l",
                 "1",
             ]);
+        } else {
+            command.args(["-theme-str", "window {width: 230px;}"]);
         }
         command
     } else if menu_cmd == "wofi" {
@@ -969,7 +1036,7 @@ fn menu_select(
                 "-l", "top", "-y", "20", "-W", "250", "-H", "45", "--lines", "1",
             ]);
         } else {
-            command.args(["--lines", &lines]);
+            command.args(["--lines", &lines, "-W", "230"]);
         }
         command
     } else {
