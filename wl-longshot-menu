@@ -116,15 +116,15 @@ grim_mode_label() { case "$1" in manual) printf '%s\n' "$STR_MANUAL" ;; *) print
 
 run_capture() {
     local backend action live grim_mode grim_dedup grim_fixed
-    backend="$(get_conf "$FILE_BACKEND" grim)"
+    backend="$(get_conf "$FILE_BACKEND" frame)"
     action="$(get_conf "$FILE_ACTION" preview)"
-    live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+    live="$(get_conf "$FILE_LIVE_PREVIEW" on)"
     grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
     grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
     grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
 
     local -a args=(--backend "$backend")
-    [[ "$live" == on ]] && args+=(--preview)
+    [[ "$live" == on ]] && args+=(--preview) || args+=(--no-preview)
     case "$action" in preview) args+=(--open) ;; edit) args+=(--edit) ;; esac
     if [[ "$backend" == grim ]]; then
         args+=(--grim-mode "$grim_mode")
@@ -137,9 +137,9 @@ run_capture() {
 settings_menu() {
     while true; do
         local backend action live grim_mode grim_dedup grim_fixed choice items
-        backend="$(get_conf "$FILE_BACKEND" grim)"
+        backend="$(get_conf "$FILE_BACKEND" frame)"
         action="$(get_conf "$FILE_ACTION" preview)"
-        live="$(get_conf "$FILE_LIVE_PREVIEW" off)"
+        live="$(get_conf "$FILE_LIVE_PREVIEW" on)"
         grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
         grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
         grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"

@@ -243,14 +243,14 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         geometry: None,
         backend: Backend::Frame,
         fps: DEFAULT_FPS,
-        copy: false,
+        copy: true,
         open: false,
         edit: false,
         debug_dir: None,
         debug_timing: false,
         show_border: true,
         border_color: None,
-        preview: false,
+        preview: true,
         preview_width: 320,
         stream: None,
         stream_keep_frames: false,
@@ -295,6 +295,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 }
             }
             "-c" | "--copy" => config.copy = true,
+            "--no-copy" => config.copy = false,
             "--open" => config.open = true,
             "--edit" => config.edit = true,
             "--debug-dir" => {
@@ -311,6 +312,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 );
             }
             "--preview" => config.preview = true,
+            "--no-preview" => config.preview = false,
             "--preview-width" => {
                 index += 1;
                 let value = take_arg(&args, index, "--preview-width")?;
@@ -413,8 +415,9 @@ fn print_help() {
     println!("      --no-boarder        Hide the capture border overlay.");
     println!("      --boarder-color <c> Set border color, e.g. '#d2c973'.");
     println!(
-        "      --preview           Show a live layer-shell preview beside the capture region."
+        "      --preview           Show a live layer-shell preview beside the capture region. Enabled by default."
     );
+    println!("      --no-preview       Disable the live layer-shell preview.");
     println!("      --preview-width <n> Preview content width in pixels. Defaults to 320.");
     println!("                         Left-click preview to zoom; use mouse wheel to scroll.");
     println!("      --stream <dir>      Write accepted intermediate PNGs to a stream directory.");
@@ -423,7 +426,10 @@ fn print_help() {
     println!("      --grim-mode <mode>  Grim mode: auto, manual. Defaults to auto.");
     println!("      --no-grim-fixed-width  Allow manual grim captures to change width.");
     println!("      --no-grim-dedup     Append manual grim captures without overlap dedup.");
-    println!("  -c, --copy              Copy result to clipboard with wl-copy.");
+    println!(
+        "  -c, --copy              Copy result to clipboard with wl-copy. Enabled by default."
+    );
+    println!("      --no-copy           Do not copy result to clipboard.");
     println!("      --open              Open result with xdg-open.");
     println!("      --edit              Open result with satty.");
     println!("      --debug-dir <dir>   Dump captured frames and stitch logs.");
