@@ -1321,8 +1321,9 @@ fn sync_preview_view(
 ) {
     let accepted_or_seen = matches!(
         outcome.status,
-        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+        StitchStatus::FirstFrame | StitchStatus::Appended
     );
+    let stable_no_progress = outcome.status == StitchStatus::NoProgress && outcome.edge.is_none();
     let should_follow = matches!(
         outcome.status,
         StitchStatus::FirstFrame | StitchStatus::Appended
@@ -1330,7 +1331,7 @@ fn sync_preview_view(
     if outcome.status == StitchStatus::FirstFrame {
         view.capture_pos = 0;
         view.capture_len = outcome.frame_len;
-    } else if accepted_or_seen {
+    } else if accepted_or_seen || stable_no_progress {
         view.capture_pos =
             if outcome.status == StitchStatus::Appended && outcome.edge == Some(Edge::Start) {
                 0
@@ -2491,7 +2492,7 @@ mod tests {
             },
             320,
         );
-        assert_eq!(view.capture_pos, 44);
+        assert_eq!(view.capture_pos, 30);
     }
 
     #[test]
@@ -2516,6 +2517,35 @@ mod tests {
         assert_eq!(view.capture_len, 0);
         assert_eq!(view.scrub_pos, 80);
         assert_eq!(view.edge, Some(Edge::End));
+    }
+
+    #[test]
+    fn upward_auto_follow_keeps_preview_at_top() {
+        let mut stitcher = Stitcher::new();
+        let first = stitcher.push_frame_result(vertical_frame(120, 80));
+        let mut view = PreviewView::default();
+        sync_preview_view(&mut view, &stitcher, first, 320);
+
+        let second = stitcher.push_frame_result(vertical_frame(60, 80));
+        assert_eq!(second.status, StitchStatus::Appended);
+        assert_eq!(second.edge, Some(Edge::Start));
+        sync_preview_view(&mut view, &stitcher, second, 320);
+        assert!(view.following);
+        assert_eq!(view.capture_pos, 0);
+        assert_eq!(view.scrub_pos, 0);
+        assert_eq!(view.edge, Some(Edge::Start));
+
+        let duplicate = StitchResult {
+            status: StitchStatus::NoProgress,
+            added: 0,
+            edge: None,
+            position: 0,
+            frame_len: 80,
+        };
+        sync_preview_view(&mut view, &stitcher, duplicate, 320);
+        assert_eq!(view.capture_pos, 0);
+        assert_eq!(view.scrub_pos, 0);
+        assert_eq!(view.edge, Some(Edge::Start));
     }
 
     #[test]
