@@ -7,6 +7,7 @@ MENU_MIN_LINES=1
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
 FILE_LIVE_PREVIEW="$CONFIG_DIR/live_preview"
+FILE_SUBTITLE="$CONFIG_DIR/subtitle"
 FILE_GRIM_MODE="$CONFIG_DIR/grim_mode"
 FILE_GRIM_DEDUP="$CONFIG_DIR/grim_dedup"
 FILE_GRIM_FIXED_WIDTH="$CONFIG_DIR/grim_fixed_width"
@@ -21,6 +22,7 @@ if [[ "${LANG:-}" == zh* || "${LANG:-}" == *ZH* ]]; then
     STR_BACKEND="后端"
     STR_ACTION="动作"
     STR_LIVE_PREVIEW="实时预览"
+    STR_SUBTITLE="字幕模式"
     STR_CAPTURE_MODE="截图方式"
     STR_GRIM_DEDUP="去重"
     STR_GRIM_FIXED="定宽"
@@ -39,6 +41,7 @@ else
     STR_BACKEND="Backend"
     STR_ACTION="Action"
     STR_LIVE_PREVIEW="Live Preview"
+    STR_SUBTITLE="Subtitle Mode"
     STR_CAPTURE_MODE="Capture Mode"
     STR_GRIM_DEDUP="Deduplicate"
     STR_GRIM_FIXED="Fixed Width"
@@ -124,10 +127,11 @@ action_label() { case "$1" in preview) printf '%s\n' "$STR_PREVIEW" ;; edit) pri
 grim_mode_label() { case "$1" in manual) printf '%s\n' "$STR_MANUAL" ;; *) printf '%s\n' "$STR_AUTO" ;; esac; }
 
 run_capture() {
-    local backend action live grim_mode grim_dedup grim_fixed
+    local backend action live subtitle grim_mode grim_dedup grim_fixed
     backend="$(get_conf "$FILE_BACKEND" frame)"
     action="$(get_conf "$FILE_ACTION" preview)"
     live="$(get_conf "$FILE_LIVE_PREVIEW" on)"
+    subtitle="$(get_conf "$FILE_SUBTITLE" off)"
     grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
     grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
     grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
@@ -139,8 +143,11 @@ run_capture() {
         args+=(--control menu --menu-cmd "$control_menu")
     fi
     [[ "$live" == on ]] && args+=(--preview) || args+=(--no-preview)
+    if [[ "$subtitle" == on ]]; then
+        args+=(--subtitle --backend frame --fps 10)
+    fi
     case "$action" in preview) args+=(--open) ;; edit) args+=(--edit) ;; esac
-    if [[ "$backend" == grim ]]; then
+    if [[ "$backend" == grim && "$subtitle" != on ]]; then
         args+=(--grim-mode "$grim_mode")
         [[ "$grim_dedup" == off ]] && args+=(--no-grim-dedup)
         [[ "$grim_fixed" == off ]] && args+=(--no-grim-fixed-width)
@@ -150,15 +157,16 @@ run_capture() {
 
 settings_menu() {
     while true; do
-        local backend action live grim_mode grim_dedup grim_fixed choice items
+        local backend action live subtitle grim_mode grim_dedup grim_fixed choice items
         backend="$(get_conf "$FILE_BACKEND" frame)"
         action="$(get_conf "$FILE_ACTION" preview)"
         live="$(get_conf "$FILE_LIVE_PREVIEW" on)"
+        subtitle="$(get_conf "$FILE_SUBTITLE" off)"
         grim_mode="$(get_conf "$FILE_GRIM_MODE" auto)"
         grim_dedup="$(get_conf "$FILE_GRIM_DEDUP" on)"
         grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
-        items="$STR_BACK\n$STR_BACKEND [$backend]\n$STR_ACTION [$(action_label "$action")]\n$STR_LIVE_PREVIEW [$(switch_label "$live")]"
-        if [[ "$backend" == grim ]]; then
+        items="$STR_BACK\n$STR_BACKEND [$backend]\n$STR_ACTION [$(action_label "$action")]\n$STR_LIVE_PREVIEW [$(switch_label "$live")]\n$STR_SUBTITLE [$(switch_label "$subtitle")]"
+        if [[ "$backend" == grim && "$subtitle" != on ]]; then
             items="$items\n$STR_CAPTURE_MODE [$(grim_mode_label "$grim_mode")]"
             if [[ "$grim_mode" == manual ]]; then
                 items="$items\n$STR_GRIM_FIXED [$(switch_label "$grim_fixed")]\n$STR_GRIM_DEDUP [$(switch_label "$grim_dedup")]"
@@ -170,6 +178,7 @@ settings_menu() {
             "$STR_BACKEND"*) choice="$(show_menu "$STR_BACKEND" "$STR_BACK\nframe\ngrim" || true)"; [[ "$choice" == frame || "$choice" == grim ]] && set_conf "$FILE_BACKEND" "$choice" ;;
             "$STR_ACTION"*) choice="$(show_menu "$STR_ACTION" "$STR_BACK\n$STR_PREVIEW\n$STR_EDIT\n$STR_SAVE" || true)"; case "$choice" in "$STR_PREVIEW") set_conf "$FILE_ACTION" preview ;; "$STR_EDIT") set_conf "$FILE_ACTION" edit ;; "$STR_SAVE") set_conf "$FILE_ACTION" save ;; esac ;;
             "$STR_LIVE_PREVIEW"*) [[ "$live" == on ]] && set_conf "$FILE_LIVE_PREVIEW" off || set_conf "$FILE_LIVE_PREVIEW" on ;;
+            "$STR_SUBTITLE"*) [[ "$subtitle" == on ]] && set_conf "$FILE_SUBTITLE" off || set_conf "$FILE_SUBTITLE" on ;;
             "$STR_CAPTURE_MODE"*) [[ "$grim_mode" == auto ]] && set_conf "$FILE_GRIM_MODE" manual || set_conf "$FILE_GRIM_MODE" auto ;;
             "$STR_GRIM_FIXED"*) [[ "$grim_fixed" == on ]] && set_conf "$FILE_GRIM_FIXED_WIDTH" off || set_conf "$FILE_GRIM_FIXED_WIDTH" on ;;
             "$STR_GRIM_DEDUP"*) [[ "$grim_dedup" == on ]] && set_conf "$FILE_GRIM_DEDUP" off || set_conf "$FILE_GRIM_DEDUP" on ;;
