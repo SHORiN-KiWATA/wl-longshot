@@ -1,9 +1,12 @@
 mod capture;
 
-use capture::{FrameCapturer, OverlayConfig, PreviewConfig, PreviewOptions, Rect, parse_color};
+use capture::{
+    FrameCapturer, OverlayConfig, PreviewConfig, PreviewEdge, PreviewOptions, Rect, parse_color,
+};
 use image::{
     ImageBuffer, ImageEncoder, Rgba,
     codecs::png::{CompressionType, FilterType, PngEncoder},
+    imageops::{self, FilterType as ResizeFilterType},
 };
 use std::env;
 use std::fs::{self, File};
@@ -21,6 +24,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const APP_NAME: &str = "wl-longshot";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_FPS: u32 = 15;
+const CLIPBOARD_MAX_PIXELS: u64 = 24_000_000;
+const CLIPBOARD_MAX_HEIGHT: u32 = 16_000;
 
 type Image = ImageBuffer<Rgba<u8>, Vec<u8>>;
 
@@ -149,11 +154,25 @@ enum OutputTarget {
 #[derive(Debug)]
 struct PreviewView {
     zoomed: bool,
+    scrub_pos: u32,
+    following: bool,
+    frame_len: u32,
+    edge: Option<Edge>,
+    capture_pos: u32,
+    capture_len: u32,
 }
 
 impl Default for PreviewView {
     fn default() -> Self {
-        Self { zoomed: false }
+        Self {
+            zoomed: false,
+            scrub_pos: 0,
+            following: true,
+            frame_len: 0,
+            edge: None,
+            capture_pos: 0,
+            capture_len: 0,
+        }
     }
 }
 
@@ -397,7 +416,7 @@ fn print_help() {
         "      --preview           Show a live layer-shell preview beside the capture region."
     );
     println!("      --preview-width <n> Preview content width in pixels. Defaults to 320.");
-    println!("                         Left-click preview to zoom.");
+    println!("                         Left-click preview to zoom; use mouse wheel to scroll.");
     println!("      --stream <dir>      Write accepted intermediate PNGs to a stream directory.");
     println!("      --stream-keep-frames  Also keep numbered PNG snapshots under frames/.");
     println!("      --stream-every <n>  Stream every N accepted updates. Defaults to 1.");
@@ -521,7 +540,7 @@ fn run_frame_backend(config: &Config, output: &OutputTarget) -> Result<(), Strin
     write_png(&image, output)?;
     timing.write_png = write_start.elapsed();
     let post_start = Instant::now();
-    post_process(config, output)?;
+    post_process(config, output, &image)?;
     timing.post_process = post_start.elapsed();
     if config.debug_timing {
         print_timing(&timing);
@@ -679,7 +698,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         .full
         .ok_or_else(|| "no frames captured from grim".to_string())?;
     write_png(&image, output)?;
-    post_process(config, output)?;
+    post_process(config, output, &image)?;
     Ok(())
 }
 
@@ -768,11 +787,11 @@ fn capture_and_stitch(
                 if let Some(timing) = timing.as_deref_mut() {
                     timing.stitch += stitch_start.elapsed();
                 }
+                if preview {
+                    sync_preview_view(preview_view, &stitcher, outcome, preview_width);
+                }
                 if accepted {
                     write_stream_update(stream.as_deref_mut(), &stitcher)?;
-                    if preview {
-                        update_preview(Some(capturer), &stitcher, preview_width, preview_view)?;
-                    }
                     if let Some(dir) = debug_dir {
                         if let Some(full) = &stitcher.full {
                             let path = dir.join(format!("accepted_{frame_index:05}.png"));
@@ -781,6 +800,7 @@ fn capture_and_stitch(
                     }
                 }
                 if preview {
+                    update_preview(Some(capturer), &stitcher, preview_width, preview_view)?;
                     handle_preview_events(Some(capturer), &stitcher, preview_width, preview_view)?;
                 }
                 capturer.sleep_frame_interval(|| stop.load(Ordering::SeqCst));
@@ -813,6 +833,15 @@ fn update_preview(
             PreviewOptions {
                 width: preview_width,
                 zoomed: view.zoomed,
+                source_pos: view.scrub_pos,
+                frame_len: if view.following { view.frame_len } else { 0 },
+                edge: if view.following {
+                    preview_edge(view.edge)
+                } else {
+                    PreviewEdge::None
+                },
+                capture_pos: view.capture_pos,
+                capture_len: view.capture_len,
             },
         )?;
     }
@@ -839,18 +868,137 @@ fn handle_preview_events(
         return Ok(());
     };
     let events = capturer.take_preview_events()?;
-    if !events.toggle_zoom {
+    if !events.toggle_zoom && events.scroll_delta.abs() < f32::EPSILON {
         return Ok(());
     }
-    view.zoomed = !view.zoomed;
+    if events.toggle_zoom {
+        view.zoomed = !view.zoomed;
+        view.scrub_pos = view.scrub_pos.min(image.height().saturating_sub(1));
+    }
+    let amount = preview_scroll_amount(
+        events.scroll_delta,
+        image,
+        preview_width,
+        view.zoomed,
+        view.capture_len,
+    );
+    if events.scroll_delta < 0.0 {
+        view.scrub_pos = view.scrub_pos.saturating_sub(amount);
+        view.following = false;
+    } else if events.scroll_delta > 0.0 {
+        view.scrub_pos = view.scrub_pos.saturating_add(amount);
+        view.scrub_pos = view.scrub_pos.min(image.height().saturating_sub(1));
+        view.following = false;
+    }
     capturer.update_preview(
         image,
         PreviewOptions {
             width: preview_width,
             zoomed: view.zoomed,
+            source_pos: view.scrub_pos,
+            frame_len: if view.following { view.frame_len } else { 0 },
+            edge: if view.following {
+                preview_edge(view.edge)
+            } else {
+                PreviewEdge::None
+            },
+            capture_pos: view.capture_pos,
+            capture_len: view.capture_len,
         },
     )?;
     Ok(())
+}
+
+fn sync_preview_view(
+    view: &mut PreviewView,
+    stitcher: &Stitcher,
+    outcome: StitchResult,
+    _preview_width: u32,
+) {
+    let previous_capture_pos = view.capture_pos;
+    let previous_capture_len = view.capture_len;
+    let moved = matches!(
+        outcome.status,
+        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+    ) && (outcome.position.max(0) as u32 != previous_capture_pos
+        || outcome.frame_len != previous_capture_len
+        || outcome.added > 0);
+    if matches!(
+        outcome.status,
+        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+    ) {
+        view.capture_pos = outcome.position.max(0) as u32;
+        view.capture_len = outcome.frame_len;
+    }
+    if !view.following && moved {
+        view.following = true;
+        view.scrub_pos = view.capture_pos;
+        view.frame_len = outcome.frame_len;
+        view.edge = outcome.edge;
+        return;
+    }
+    if !view.following {
+        if outcome.edge == Some(Edge::Start) && outcome.added > 0 {
+            view.scrub_pos = view.scrub_pos.saturating_add(outcome.added);
+        }
+        return;
+    }
+    if !matches!(
+        outcome.status,
+        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+    ) {
+        return;
+    }
+    let Some(full) = stitcher.full.as_ref() else {
+        return;
+    };
+    view.scrub_pos = view.capture_pos.min(full.height().saturating_sub(1));
+    view.frame_len = outcome.frame_len;
+    view.edge = outcome.edge;
+}
+
+fn preview_edge(edge: Option<Edge>) -> PreviewEdge {
+    match edge {
+        Some(Edge::Start) => PreviewEdge::Start,
+        Some(Edge::End) => PreviewEdge::End,
+        None => PreviewEdge::None,
+    }
+}
+
+fn preview_scroll_amount(
+    delta: f32,
+    image: &Image,
+    preview_width: u32,
+    zoomed: bool,
+    capture_len: u32,
+) -> u32 {
+    let base = 16.max(estimated_preview_source_len(image, preview_width, zoomed, capture_len) / 8);
+    let notches = (delta.abs() / 15.0).max(0.35);
+    (notches * base as f32).round() as u32
+}
+
+fn estimated_preview_source_len(
+    image: &Image,
+    preview_width: u32,
+    zoomed: bool,
+    capture_len: u32,
+) -> u32 {
+    if image.width() == 0 || image.height() == 0 {
+        return 1;
+    }
+    let content_width = if zoomed {
+        preview_width.max(240)
+    } else {
+        preview_width.max(1)
+    };
+    let scaled_height =
+        ((image.height() as u64 * content_width as u64) / image.width() as u64).max(1) as u32;
+    let visible_scaled = scaled_height
+        .min(capture_len.saturating_sub(16).max(1))
+        .max(1);
+    ((visible_scaled as u64 * image.height() as u64) / scaled_height as u64)
+        .max(1)
+        .min(image.height() as u64) as u32
 }
 
 fn print_timing(timing: &TimingStats) {
@@ -901,8 +1049,6 @@ impl Stitcher {
                 frame_len,
             };
         }
-        self.last_signature = Some(signature);
-
         let frame_cols = compute_cols(&frame);
         let height = frame.height() as i32;
         let width = frame.width();
@@ -911,6 +1057,7 @@ impl Stitcher {
         if self.full.is_none() {
             self.full_cols = frame_cols.clone();
             self.last_cols = frame_cols;
+            self.last_signature = Some(signature);
             self.full = Some(frame);
             self.accepted += 1;
             return StitchResult {
@@ -923,7 +1070,6 @@ impl Stitcher {
         }
 
         if self.full.as_ref().is_some_and(|full| full.width() != width) {
-            self.last_cols = frame_cols;
             return StitchResult {
                 status: StitchStatus::NoMatch,
                 added: 0,
@@ -948,7 +1094,6 @@ impl Stitcher {
                     if edge.diff <= 9.0 {
                         pos = edge.pos;
                     } else {
-                        self.last_cols = frame_cols;
                         return StitchResult {
                             status: StitchStatus::NoMatch,
                             added: 0,
@@ -958,7 +1103,6 @@ impl Stitcher {
                         };
                     }
                 } else {
-                    self.last_cols = frame_cols;
                     return StitchResult {
                         status: StitchStatus::NoMatch,
                         added: 0,
@@ -972,8 +1116,23 @@ impl Stitcher {
 
         let full_height = self.full.as_ref().map_or(0, |full| full.height() as i32);
         let (amount, edge) = overhang_amount(pos, height, full_height);
-        if edge == Edge::Start {
-            self.last_cols = frame_cols;
+        if amount == 0 {
+            if let Some(known) = self.known_overlap_diff(&frame_cols, pos, min_overlap) {
+                if known.diff <= 9.0 {
+                    self.anchor_pos = pos;
+                    self.last_offset = pos - old_anchor;
+                    self.last_cols = frame_cols;
+                    self.last_signature = Some(signature);
+                    self.pending_edge = None;
+                    return StitchResult {
+                        status: StitchStatus::NoProgress,
+                        added: 0,
+                        edge: None,
+                        position: pos,
+                        frame_len,
+                    };
+                }
+            }
             return StitchResult {
                 status: StitchStatus::NoMatch,
                 added: 0,
@@ -982,42 +1141,7 @@ impl Stitcher {
                 frame_len,
             };
         }
-        if amount > 0 && self.growth_edge.is_some_and(|growth| growth != edge) {
-            if let Some(known) = self.find_known_position(&frame_cols, predicted_pos, min_overlap) {
-                if known.diff <= 9.0 {
-                    self.anchor_pos = known.pos;
-                    self.last_offset = known.pos - old_anchor;
-                    self.last_cols = frame_cols;
-                    self.pending_edge = None;
-                    return StitchResult {
-                        status: StitchStatus::NoProgress,
-                        added: 0,
-                        edge: None,
-                        position: known.pos,
-                        frame_len,
-                    };
-                }
-            }
-        }
-        if amount == 0 {
-            if let Some(known) = self.known_overlap_diff(&frame_cols, pos, min_overlap) {
-                if known.diff <= 9.0 {
-                    self.anchor_pos = pos;
-                    self.last_offset = pos - old_anchor;
-                }
-            }
-            self.last_cols = frame_cols;
-            self.pending_edge = None;
-            return StitchResult {
-                status: StitchStatus::NoProgress,
-                added: 0,
-                edge: None,
-                position: pos,
-                frame_len,
-            };
-        }
         if amount < 15 {
-            self.last_cols = frame_cols;
             self.pending_edge = Some(edge);
             return StitchResult {
                 status: StitchStatus::NoProgress,
@@ -1029,7 +1153,6 @@ impl Stitcher {
         }
 
         let Some(overlap) = self.known_overlap_diff(&frame_cols, pos, min_overlap) else {
-            self.last_cols = frame_cols;
             return StitchResult {
                 status: StitchStatus::NoMatch,
                 added: 0,
@@ -1044,6 +1167,7 @@ impl Stitcher {
                     self.anchor_pos = known.pos;
                     self.last_offset = known.pos - old_anchor;
                     self.last_cols = frame_cols;
+                    self.last_signature = Some(signature);
                     self.pending_edge = None;
                     return StitchResult {
                         status: StitchStatus::NoProgress,
@@ -1054,7 +1178,6 @@ impl Stitcher {
                     };
                 }
             }
-            self.last_cols = frame_cols;
             return StitchResult {
                 status: StitchStatus::NoMatch,
                 added: 0,
@@ -1066,7 +1189,6 @@ impl Stitcher {
 
         if self.pending_edge.is_some_and(|pending| pending != edge) {
             self.pending_edge = None;
-            self.last_cols = frame_cols;
             return StitchResult {
                 status: StitchStatus::NoMatch,
                 added: 0,
@@ -1082,7 +1204,6 @@ impl Stitcher {
                 Edge::End => pos + height >= full_height,
             };
             if !at_boundary {
-                self.last_cols = frame_cols;
                 return StitchResult {
                     status: StitchStatus::NoMatch,
                     added: 0,
@@ -1101,6 +1222,7 @@ impl Stitcher {
             self.anchor_pos = pos;
         }
         self.last_cols = frame_cols;
+        self.last_signature = Some(signature);
         self.last_offset = pos - old_anchor;
         self.pending_edge = None;
         self.growth_edge = Some(edge);
@@ -1402,26 +1524,40 @@ fn effective_min_overlap(frame_height: i32) -> i32 {
 fn compute_cols(image: &Image) -> Vec<[f32; 3]> {
     let height = image.height();
     let width = image.width();
-    let bands = [(0.08_f32, 0.32_f32), (0.34, 0.66), (0.68, 0.92)];
     let mut result = Vec::with_capacity(height as usize);
     for y in 0..height {
-        let mut row = [0.0; 3];
-        for (index, (start_ratio, end_ratio)) in bands.iter().enumerate() {
-            let start = ((width as f32 * start_ratio).round() as u32).min(width.saturating_sub(1));
-            let end = ((width as f32 * end_ratio).round() as u32).min(width.saturating_sub(1));
-            let count = (end.saturating_sub(start) + 1).min(17).max(1);
-            let mut total = 0.0;
-            for step in 0..count {
-                let x = if count == 1 {
-                    start
-                } else {
-                    start + ((end - start) * step) / (count - 1)
-                };
-                total += gray_pixel(image.get_pixel(x, y));
-            }
-            row[index] = total / count as f32;
+        let count = width.min(96).max(1);
+        let mut values = Vec::with_capacity(count as usize);
+        let mut total = 0.0;
+        for step in 0..count {
+            let x = if count == 1 {
+                0
+            } else {
+                ((step as u64 * (width - 1) as u64) / (count - 1) as u64) as u32
+            };
+            let gray = gray_pixel(image.get_pixel(x, y));
+            total += gray;
+            values.push(gray);
         }
-        result.push(row);
+        let mean = total / count as f32;
+        let mut bright = 0.0;
+        let mut edges = 0.0;
+        let mut contrast = 0.0;
+        let mut previous = None;
+        for gray in values.iter().copied() {
+            contrast += f32::abs(gray - mean);
+            bright += (gray - mean - 8.0).max(0.0);
+            if let Some(previous) = previous {
+                edges += f32::abs(gray - previous);
+            }
+            previous = Some(gray);
+        }
+        let edge_count = count.saturating_sub(1).max(1) as f32;
+        result.push([
+            mean * 2.0,
+            contrast / count as f32,
+            (bright / count as f32) + (edges / edge_count),
+        ]);
     }
     result
 }
@@ -1599,23 +1735,12 @@ fn encode_png_fast<W: Write>(image: &Image, writer: &mut W) -> image::ImageResul
     )
 }
 
-fn post_process(config: &Config, output: &OutputTarget) -> Result<(), String> {
+fn post_process(config: &Config, output: &OutputTarget, image: &Image) -> Result<(), String> {
     let OutputTarget::File(path) = output else {
         return Ok(());
     };
     if config.copy {
-        let file = File::open(path)
-            .map_err(|error| format!("failed to open {}: {error}", path.display()))?;
-        let mut child = Command::new("wl-copy")
-            .stdin(Stdio::from(file))
-            .spawn()
-            .map_err(|error| format!("failed to start wl-copy: {error}"))?;
-        let status = child
-            .wait()
-            .map_err(|error| format!("failed to wait for wl-copy: {error}"))?;
-        if !status.success() {
-            return Err("wl-copy failed".to_string());
-        }
+        copy_image_to_clipboard(image)?;
     }
     if config.open {
         spawn_detached("xdg-open", path)?;
@@ -1624,6 +1749,61 @@ fn post_process(config: &Config, output: &OutputTarget) -> Result<(), String> {
         spawn_detached("satty", path)?;
     }
     Ok(())
+}
+
+fn copy_image_to_clipboard(image: &Image) -> Result<(), String> {
+    let clipboard_image = clipboard_image(image);
+    let mut data = Vec::new();
+    encode_png_compact_rgb(&clipboard_image, &mut data)
+        .map_err(|error| format!("failed to encode clipboard PNG: {error}"))?;
+    let mut child = Command::new("wl-copy")
+        .arg("--foreground")
+        .arg("-t")
+        .arg("image/png")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to start wl-copy: {error}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "failed to open wl-copy stdin".to_string())?;
+        stdin
+            .write_all(&data)
+            .map_err(|error| format!("failed to write image to wl-copy: {error}"))?;
+    }
+    drop(child);
+    Ok(())
+}
+
+fn clipboard_image(image: &Image) -> Image {
+    let pixels = image.width() as u64 * image.height() as u64;
+    if pixels <= CLIPBOARD_MAX_PIXELS && image.height() <= CLIPBOARD_MAX_HEIGHT {
+        return image.clone();
+    }
+    let scale_by_pixels = (CLIPBOARD_MAX_PIXELS as f64 / pixels.max(1) as f64).sqrt();
+    let scale_by_height = CLIPBOARD_MAX_HEIGHT as f64 / image.height().max(1) as f64;
+    let scale = scale_by_pixels.min(scale_by_height).min(1.0);
+    let width = ((image.width() as f64 * scale).round() as u32).max(1);
+    let height = ((image.height() as f64 * scale).round() as u32).max(1);
+    imageops::resize(image, width, height, ResizeFilterType::Triangle)
+}
+
+fn encode_png_compact_rgb<W: Write>(image: &Image, writer: &mut W) -> image::ImageResult<()> {
+    let mut rgb = Vec::with_capacity(image.width() as usize * image.height() as usize * 3);
+    for pixel in image.pixels() {
+        rgb.extend_from_slice(&[pixel[0], pixel[1], pixel[2]]);
+    }
+    let encoder =
+        PngEncoder::new_with_quality(writer, CompressionType::Default, FilterType::Adaptive);
+    encoder.write_image(
+        &rgb,
+        image.width(),
+        image.height(),
+        image::ColorType::Rgb8.into(),
+    )
 }
 
 fn spawn_detached(command: &str, path: &Path) -> Result<(), String> {
@@ -1641,16 +1821,17 @@ fn spawn_detached(command: &str, path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn row_color(index: u32) -> Rgba<u8> {
+    fn row_color(index: i32) -> Rgba<u8> {
+        let index = index.wrapping_add(10_000) as u32;
         let hash = index.wrapping_mul(2_654_435_761).rotate_left(13) ^ index.wrapping_mul(97_531);
         Rgba([(hash >> 16) as u8, (hash >> 8) as u8, hash as u8, 255])
     }
 
-    fn vertical_frame(first_row: u32, height: u32) -> Image {
+    fn vertical_frame(first_row: i32, height: u32) -> Image {
         let width = 24;
         let mut image = Image::new(width, height);
         for y in 0..height {
-            let color = row_color(first_row + y);
+            let color = row_color(first_row + y as i32);
             for x in 0..width {
                 image.put_pixel(x, y, color);
             }
@@ -1671,5 +1852,104 @@ mod tests {
         assert_eq!(full.height(), 140);
         assert_eq!(*full.get_pixel(0, 0), row_color(0));
         assert_eq!(*full.get_pixel(0, 139), row_color(139));
+    }
+
+    #[test]
+    fn prepends_upward_frames() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(60, 80)).status,
+            StitchStatus::FirstFrame
+        );
+
+        let second = stitcher.push_frame_result(vertical_frame(0, 80));
+        assert_eq!(second.status, StitchStatus::Appended);
+        assert_eq!(second.edge, Some(Edge::Start));
+        assert_eq!(second.added, 60);
+
+        let full = stitcher.full.as_ref().expect("stitched image");
+        assert_eq!(full.height(), 140);
+        assert_eq!(*full.get_pixel(0, 0), row_color(0));
+        assert_eq!(*full.get_pixel(0, 139), row_color(139));
+    }
+
+    #[test]
+    fn can_prepend_after_downward_scroll_then_append_again() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(0, 80)).status,
+            StitchStatus::FirstFrame
+        );
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(60, 80)).status,
+            StitchStatus::Appended
+        );
+
+        let upward = stitcher.push_frame_result(vertical_frame(-20, 80));
+        assert_eq!(upward.status, StitchStatus::Appended);
+        assert_eq!(upward.edge, Some(Edge::Start));
+        assert_eq!(upward.added, 20);
+
+        let known = stitcher.push_frame_result(vertical_frame(60, 80));
+        assert_eq!(known.status, StitchStatus::NoProgress);
+
+        let downward = stitcher.push_frame_result(vertical_frame(100, 80));
+        assert_eq!(downward.status, StitchStatus::Appended);
+        assert_eq!(downward.edge, Some(Edge::End));
+        assert_eq!(downward.added, 40);
+
+        let full = stitcher.full.as_ref().expect("stitched image");
+        assert_eq!(full.height(), 200);
+        assert_eq!(*full.get_pixel(0, 0), row_color(-20));
+        assert_eq!(*full.get_pixel(0, 199), row_color(179));
+    }
+
+    #[test]
+    fn continuous_upward_scroll_prepends_multiple_times() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(120, 80)).status,
+            StitchStatus::FirstFrame
+        );
+
+        let second = stitcher.push_frame_result(vertical_frame(60, 80));
+        assert_eq!(second.status, StitchStatus::Appended);
+        assert_eq!(second.edge, Some(Edge::Start));
+        assert_eq!(second.added, 60);
+
+        let third = stitcher.push_frame_result(vertical_frame(0, 80));
+        assert_eq!(third.status, StitchStatus::Appended);
+        assert_eq!(third.edge, Some(Edge::Start));
+        assert_eq!(third.added, 60);
+
+        let full = stitcher.full.as_ref().expect("stitched image");
+        assert_eq!(full.height(), 200);
+        assert_eq!(*full.get_pixel(0, 0), row_color(0));
+        assert_eq!(*full.get_pixel(0, 199), row_color(199));
+    }
+
+    #[test]
+    fn rejected_frame_does_not_poison_next_append() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(0, 80)).status,
+            StitchStatus::FirstFrame
+        );
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(60, 80)).status,
+            StitchStatus::Appended
+        );
+
+        let bad = stitcher.push_frame_result(vertical_frame(500, 80));
+        assert_eq!(bad.status, StitchStatus::NoMatch);
+
+        let next = stitcher.push_frame_result(vertical_frame(100, 80));
+        assert_eq!(next.status, StitchStatus::Appended);
+        assert_eq!(next.edge, Some(Edge::End));
+        assert_eq!(next.added, 40);
+
+        let full = stitcher.full.as_ref().expect("stitched image");
+        assert_eq!(full.height(), 180);
+        assert_eq!(*full.get_pixel(0, 179), row_color(179));
     }
 }

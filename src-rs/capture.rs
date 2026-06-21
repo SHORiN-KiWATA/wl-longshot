@@ -39,11 +39,24 @@ pub struct PreviewConfig {
 pub struct PreviewOptions {
     pub width: u32,
     pub zoomed: bool,
+    pub source_pos: u32,
+    pub frame_len: u32,
+    pub edge: PreviewEdge,
+    pub capture_pos: u32,
+    pub capture_len: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewEdge {
+    None,
+    Start,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PreviewEvents {
     pub toggle_zoom: bool,
+    pub scroll_delta: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -121,6 +134,7 @@ struct CaptureState {
     preview_width: u32,
     pointer_on_preview: bool,
     preview_toggle_zoom: bool,
+    preview_scroll_delta: f32,
     accent_color: [u8; 3],
 }
 
@@ -188,6 +202,7 @@ impl FrameCapturer {
             preview_width: overlay_config.preview.width,
             pointer_on_preview: false,
             preview_toggle_zoom: false,
+            preview_scroll_delta: 0.0,
             accent_color: overlay_config.color.unwrap_or_else(resolve_accent_color),
         };
 
@@ -344,6 +359,7 @@ impl FrameCapturer {
             .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
         Ok(PreviewEvents {
             toggle_zoom: std::mem::take(&mut self.state.preview_toggle_zoom),
+            scroll_delta: std::mem::take(&mut self.state.preview_scroll_delta),
         })
     }
 }
@@ -464,6 +480,11 @@ impl CaptureState {
             PreviewOptions {
                 width: self.preview_width,
                 zoomed: false,
+                source_pos: 0,
+                frame_len: 0,
+                edge: PreviewEdge::None,
+                capture_pos: 0,
+                capture_len: 0,
             },
         );
         let surface = compositor.create_surface(qh, ());
@@ -569,6 +590,11 @@ impl CaptureState {
             buffer.stride as usize,
             image,
             self.accent_color,
+            options.source_pos,
+            options.frame_len,
+            options.edge,
+            options.capture_pos,
+            options.capture_len,
         );
         let preview = self.preview.as_mut().expect("preview exists");
         preview.surface.attach(Some(&buffer.buffer), 0, 0);
@@ -886,6 +912,12 @@ impl Dispatch<wl_pointer::WlPointer, ()> for CaptureState {
                     matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
                 if state.pointer_on_preview && pressed && button == 0x110 {
                     state.preview_toggle_zoom = true;
+                }
+            }
+            wl_pointer::Event::Axis { axis, value, .. } => {
+                let vertical = matches!(axis, WEnum::Value(wl_pointer::Axis::VerticalScroll));
+                if state.pointer_on_preview && vertical {
+                    state.preview_scroll_delta += value as f32;
                 }
             }
             _ => {}
@@ -1206,6 +1238,11 @@ fn draw_preview_image(
     stride: usize,
     image: &Image,
     accent: [u8; 3],
+    source_pos: u32,
+    frame_len: u32,
+    edge: PreviewEdge,
+    capture_pos: u32,
+    capture_len: u32,
 ) {
     buffer.fill(0);
     fill_rect(
@@ -1223,6 +1260,14 @@ fn draw_preview_image(
     let padding = 8;
     let content_width = width.saturating_sub(padding * 2).max(1);
     let content_height = height.saturating_sub(padding * 2).max(1);
+    let viewport = preview_viewport(
+        image,
+        content_width,
+        content_height,
+        source_pos,
+        frame_len,
+        edge,
+    );
     blit_latest_viewport(
         buffer,
         stride,
@@ -1233,6 +1278,22 @@ fn draw_preview_image(
         padding,
         content_width,
         content_height,
+        viewport,
+    );
+    draw_preview_position_indicator(
+        buffer,
+        stride,
+        width,
+        height,
+        image,
+        padding,
+        padding,
+        content_width,
+        content_height,
+        viewport,
+        capture_pos,
+        capture_len,
+        accent,
     );
 
     stroke_rect(
@@ -1249,6 +1310,89 @@ fn draw_preview_image(
     );
 }
 
+fn draw_preview_position_indicator(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    image: &Image,
+    x: u32,
+    y: u32,
+    draw_width: u32,
+    draw_height: u32,
+    viewport: PreviewViewport,
+    capture_pos: u32,
+    capture_len: u32,
+    accent: [u8; 3],
+) {
+    if image.height() == 0 || draw_height < 12 || draw_width < 8 {
+        return;
+    }
+    let track_width = 3;
+    let track_x = x + draw_width.saturating_sub(track_width + 2);
+    fill_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        track_x,
+        y + 2,
+        track_width,
+        draw_height.saturating_sub(4),
+        [255, 255, 255, 38],
+    );
+
+    let usable_height = draw_height.saturating_sub(4);
+    let marker_height = ((capture_len as u64 * usable_height as u64 + image.height() as u64 / 2)
+        / image.height() as u64)
+        .max(4)
+        .min(usable_height as u64) as u32;
+    let capture_center = capture_pos
+        .saturating_add(capture_len / 2)
+        .min(image.height());
+    let center_y = y
+        + 2
+        + ((capture_center as u64 * usable_height as u64 + image.height() as u64 / 2)
+            / image.height() as u64) as u32;
+    let marker_y = center_y.saturating_sub(marker_height / 2);
+    if viewport.max_source_start > 0 {
+        let thumb_height = ((viewport.source_len as u64 * usable_height as u64)
+            / image.height() as u64)
+            .max(10)
+            .min(usable_height as u64) as u32;
+        let thumb_y = y
+            + 2
+            + ((viewport.source_start as u64 * usable_height.saturating_sub(thumb_height) as u64)
+                / viewport.max_source_start as u64) as u32;
+
+        fill_rect(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            track_x,
+            thumb_y,
+            track_width,
+            thumb_height,
+            [255, 255, 255, 92],
+        );
+    }
+
+    if capture_len > 0 {
+        fill_rect(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            track_x.saturating_sub(1),
+            marker_y.min(y + 2 + usable_height.saturating_sub(marker_height)),
+            track_width + 2,
+            marker_height,
+            [accent[0], accent[1], accent[2], 205],
+        );
+    }
+}
+
 fn blit_latest_viewport(
     buffer: &mut [u8],
     stride: usize,
@@ -1259,15 +1403,14 @@ fn blit_latest_viewport(
     y: u32,
     draw_width: u32,
     draw_height: u32,
+    viewport: PreviewViewport,
 ) {
     if image.width() == 0 || image.height() == 0 || draw_width == 0 || draw_height == 0 {
         return;
     }
-    let scaled_height = scale_height_for_width(image.width(), image.height(), draw_width);
-    let visible_scaled_start = scaled_height.saturating_sub(draw_height);
     for dy in 0..draw_height {
-        let sy = (((visible_scaled_start + dy) as u64 * image.height() as u64)
-            / scaled_height as u64) as u32;
+        let sy = (((viewport.scaled_start + dy) as u64 * image.height() as u64)
+            / viewport.scaled_height as u64) as u32;
         for dx in 0..draw_width {
             let sx = (dx as u64 * image.width() as u64 / draw_width as u64) as u32;
             let pixel = image.get_pixel(sx.min(image.width() - 1), sy.min(image.height() - 1));
@@ -1281,6 +1424,48 @@ fn blit_latest_viewport(
                 [pixel[0], pixel[1], pixel[2], pixel[3]],
             );
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PreviewViewport {
+    scaled_height: u32,
+    scaled_start: u32,
+    source_start: u32,
+    source_len: u32,
+    max_source_start: u32,
+}
+
+fn preview_viewport(
+    image: &Image,
+    draw_width: u32,
+    draw_height: u32,
+    source_pos: u32,
+    frame_len: u32,
+    edge: PreviewEdge,
+) -> PreviewViewport {
+    let scaled_height = scale_height_for_width(image.width(), image.height(), draw_width);
+    let max_scaled_start = scaled_height.saturating_sub(draw_height);
+    let visible_scaled = draw_height.min(scaled_height).max(1);
+    let source_len = ((visible_scaled as u64 * image.height() as u64) / scaled_height as u64)
+        .max(1)
+        .min(image.height() as u64) as u32;
+    let max_source_start = image.height().saturating_sub(source_len);
+    let source_start = match edge {
+        PreviewEdge::End => source_pos
+            .saturating_add(frame_len)
+            .saturating_sub(source_len),
+        PreviewEdge::Start | PreviewEdge::None => source_pos,
+    }
+    .min(max_source_start);
+    let scaled_start = ((source_start as u64 * scaled_height as u64) / image.height() as u64)
+        .min(max_scaled_start as u64) as u32;
+    PreviewViewport {
+        scaled_height,
+        scaled_start,
+        source_start,
+        source_len,
+        max_source_start,
     }
 }
 
