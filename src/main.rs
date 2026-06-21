@@ -1331,11 +1331,12 @@ fn sync_preview_view(
         view.capture_pos = 0;
         view.capture_len = outcome.frame_len;
     } else if accepted_or_seen {
-        view.capture_pos = if outcome.edge == Some(Edge::Start) {
-            0
-        } else {
-            outcome.position.max(0) as u32
-        };
+        view.capture_pos =
+            if outcome.status == StitchStatus::Appended && outcome.edge == Some(Edge::Start) {
+                0
+            } else {
+                outcome.position.max(0) as u32
+            };
         view.capture_len = outcome.frame_len;
     }
     if !view.following && should_follow {
@@ -2477,6 +2478,20 @@ mod tests {
         assert_eq!(view.capture_pos, 30);
         assert_eq!(view.capture_len, 80);
         assert_eq!(view.scrub_pos, 0);
+
+        sync_preview_view(
+            &mut view,
+            &stitcher,
+            StitchResult {
+                status: StitchStatus::NoProgress,
+                added: 0,
+                edge: Some(Edge::Start),
+                position: 44,
+                frame_len: 80,
+            },
+            320,
+        );
+        assert_eq!(view.capture_pos, 44);
     }
 
     #[test]
