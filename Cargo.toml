@@ -1,0 +1,17 @@
+[package]
+name = "wl-longshot"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "wl-longshot"
+path = "src-rs/main.rs"
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+memmap2 = "0.9"
+rustix = { version = "1.1", features = ["event", "fs", "mm", "shm"] }
+tempfile = "3.23"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
