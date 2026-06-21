@@ -732,15 +732,24 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         if selected.trim().is_empty() {
             continue;
         }
-        let next_geometry = if config.grim_fixed_width {
-            let next = Rect::parse(&selected)?;
-            format!(
-                "{},{} {}x{}",
-                base_rect.x, next.y, base_rect.width, next.height
-            )
+        let selected_rect = Rect::parse(&selected)?;
+        let next_rect = if config.grim_fixed_width {
+            Rect {
+                x: base_rect.x,
+                y: selected_rect.y,
+                width: base_rect.width,
+                height: selected_rect.height,
+            }
         } else {
-            selected
+            selected_rect
         };
+        let next_geometry = format!(
+            "{},{} {}x{}",
+            next_rect.x, next_rect.y, next_rect.width, next_rect.height
+        );
+        if let Some(capturer) = overlay.as_mut() {
+            capturer.set_geometry(next_rect);
+        }
 
         let frame = grim_capture(&next_geometry)?;
         if config.grim_mode == GrimMode::Manual && !config.grim_dedup {

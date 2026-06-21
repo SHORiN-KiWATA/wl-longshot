@@ -1,6 +1,6 @@
 use image::{ImageBuffer, Rgba};
 use memmap2::{MmapMut, MmapOptions};
-use rustix::event::{PollFd, PollFlags, poll};
+use rustix::event::{PollFd, PollFlags, Timespec, poll};
 use std::env;
 use std::fs;
 use std::os::fd::AsFd;
@@ -354,13 +354,57 @@ impl FrameCapturer {
     }
 
     pub fn take_preview_events(&mut self) -> Result<PreviewEvents, String> {
-        self.event_queue
-            .dispatch_pending(&mut self.state)
-            .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
+        self.pump_pending_events()?;
         Ok(PreviewEvents {
             toggle_zoom: std::mem::take(&mut self.state.preview_toggle_zoom),
             scroll_delta: std::mem::take(&mut self.state.preview_scroll_delta),
         })
+    }
+
+    pub fn set_geometry(&mut self, geometry: Rect) {
+        self.state.geometry = geometry;
+        self.state.target_index = self.state.find_target_output();
+    }
+
+    fn pump_pending_events(&mut self) -> Result<(), String> {
+        loop {
+            let dispatched = self
+                .event_queue
+                .dispatch_pending(&mut self.state)
+                .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
+            if dispatched > 0 {
+                continue;
+            }
+            self.event_queue
+                .flush()
+                .map_err(|error| format!("failed to flush Wayland requests: {error}"))?;
+            let Some(guard) = self.event_queue.prepare_read() else {
+                continue;
+            };
+            let wayland_fd = guard.connection_fd();
+            let mut fds = [PollFd::from_borrowed_fd(
+                wayland_fd,
+                PollFlags::IN | PollFlags::ERR,
+            )];
+            let timeout = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            poll(&mut fds, Some(&timeout))
+                .map_err(|error| format!("failed to poll Wayland socket: {error}"))?;
+            let ready = fds[0].revents().intersects(PollFlags::IN | PollFlags::ERR);
+            if !ready {
+                drop(guard);
+                break;
+            }
+            guard
+                .read()
+                .map_err(|error| format!("failed to read Wayland events: {error}"))?;
+        }
+        self.event_queue
+            .dispatch_pending(&mut self.state)
+            .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
+        Ok(())
     }
 }
 
