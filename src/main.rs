@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc,
 };
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -41,6 +42,19 @@ enum GrimMode {
     Manual,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControlMode {
+    Stdin,
+    Menu,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GrimAction {
+    Next,
+    Finish,
+    Abort,
+}
+
 #[derive(Debug)]
 struct Config {
     output: Option<String>,
@@ -62,6 +76,8 @@ struct Config {
     grim_mode: GrimMode,
     grim_fixed_width: bool,
     grim_dedup: bool,
+    control: ControlMode,
+    menu_cmd: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -258,6 +274,8 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         grim_mode: GrimMode::Auto,
         grim_fixed_width: true,
         grim_dedup: true,
+        control: ControlMode::Stdin,
+        menu_cmd: None,
     };
 
     let mut positional = Vec::new();
@@ -346,6 +364,14 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
             "--no-grim-fixed-width" => config.grim_fixed_width = false,
             "--grim-dedup" => config.grim_dedup = true,
             "--no-grim-dedup" => config.grim_dedup = false,
+            "--control" => {
+                index += 1;
+                config.control = parse_control_mode(&take_arg(&args, index, "--control")?)?;
+            }
+            "--menu-cmd" => {
+                index += 1;
+                config.menu_cmd = Some(take_arg(&args, index, "--menu-cmd")?);
+            }
             "--list-backends" => {
                 println!("frame");
                 println!("grim");
@@ -397,6 +423,14 @@ fn parse_grim_mode(value: &str) -> Result<GrimMode, String> {
     }
 }
 
+fn parse_control_mode(value: &str) -> Result<ControlMode, String> {
+    match value {
+        "stdin" => Ok(ControlMode::Stdin),
+        "menu" => Ok(ControlMode::Menu),
+        _ => Err(format!("invalid control mode: {value}")),
+    }
+}
+
 fn print_help() {
     println!("Usage: wl-longshot [options] [output-file]");
     println!();
@@ -426,6 +460,8 @@ fn print_help() {
     println!("      --grim-mode <mode>  Grim mode: auto, manual. Defaults to auto.");
     println!("      --no-grim-fixed-width  Allow manual grim captures to change width.");
     println!("      --no-grim-dedup     Append manual grim captures without overlap dedup.");
+    println!("      --control <mode>    Control mode: stdin, menu. Defaults to stdin.");
+    println!("      --menu-cmd <cmd>    Menu command for --control menu.");
     println!(
         "  -c, --copy              Copy result to clipboard with wl-copy. Enabled by default."
     );
@@ -523,7 +559,7 @@ fn run_frame_backend(config: &Config, output: &OutputTarget) -> Result<(), Strin
         },
     )?;
     let stop = Arc::new(AtomicBool::new(false));
-    let stop_wake = spawn_enter_stop(stop.clone())?;
+    let stop_wake = spawn_stop_controller(stop.clone(), config)?;
     let mut timing = TimingStats::default();
     let mut preview_view = PreviewView::default();
     let mut stream = config
@@ -606,65 +642,20 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             &mut preview_view,
         )?;
     }
-
-    if config.preview && config.grim_mode == GrimMode::Auto {
-        let stop = Arc::new(AtomicBool::new(false));
-        let _stop_wake = spawn_enter_stop(stop.clone())?;
-        let frame_interval = if config.fps == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_secs_f64(1.0 / config.fps as f64)
-        };
-        while !stop.load(Ordering::SeqCst) {
-            let started = Instant::now();
-            let frame = grim_capture(&geometry)?;
-            let outcome = stitcher.push_frame_result(frame);
-            let accepted = outcome.accepted();
-            sync_preview_view(&mut preview_view, &stitcher, outcome, config.preview_width);
-            if accepted {
-                write_stream_update(stream.as_mut(), &stitcher)?;
-            }
-            update_preview(
-                overlay.as_mut(),
-                &stitcher,
-                config.preview_width,
-                &mut preview_view,
-            )?;
-            handle_preview_events(
-                overlay.as_mut(),
-                &stitcher,
-                config.preview_width,
-                &mut preview_view,
-            )?;
-            let elapsed = started.elapsed();
-            if elapsed < frame_interval {
-                thread::sleep(frame_interval - elapsed);
-            }
-        }
-
-        let image = stitcher
-            .full
-            .ok_or_else(|| "no frames captured from grim".to_string())?;
-        write_png(&image, output)?;
-        post_process(config, output, &image)?;
-        return Ok(());
-    }
+    let action_rx = spawn_grim_action_controller(config)?;
 
     loop {
-        eprintln!(
-            "Press Enter to capture next, 'f' then Enter to finish, 'q' then Enter to abort."
-        );
-        let mut input = String::new();
-        let bytes = io::stdin()
-            .read_line(&mut input)
-            .map_err(|error| format!("failed to read input: {error}"))?;
-        if bytes == 0 {
-            break;
-        }
-        match input.trim() {
-            "f" | "finish" => break,
-            "q" | "abort" => return Ok(()),
-            _ => {}
+        match wait_for_grim_action(
+            &action_rx,
+            overlay.as_mut(),
+            &stitcher,
+            config.preview,
+            config.preview_width,
+            &mut preview_view,
+        )? {
+            Some(GrimAction::Next) => {}
+            Some(GrimAction::Finish) | None => break,
+            Some(GrimAction::Abort) => return Ok(()),
         }
 
         let next_geometry = match config.grim_mode {
@@ -781,17 +772,234 @@ fn run_slurp() -> Result<String, String> {
         .map_err(|_| "slurp returned invalid UTF-8".to_string())
 }
 
-fn spawn_enter_stop(stop: Arc<AtomicBool>) -> Result<UnixStream, String> {
+fn spawn_stop_controller(stop: Arc<AtomicBool>, config: &Config) -> Result<UnixStream, String> {
     let (read_end, mut write_end) = UnixStream::pair()
         .map_err(|error| format!("failed to create stop wake socket: {error}"))?;
-    eprintln!("Press Enter to stop capturing.");
+    let control = config.control;
+    let menu_cmd = if control == ControlMode::Menu {
+        Some(resolve_menu_cmd(config.menu_cmd.as_deref())?)
+    } else {
+        None
+    };
     thread::spawn(move || {
-        let mut line = String::new();
-        let _ = io::stdin().read_line(&mut line);
+        match control {
+            ControlMode::Stdin => {
+                eprintln!("Press Enter to stop capturing.");
+                let mut line = String::new();
+                let _ = io::stdin().read_line(&mut line);
+            }
+            ControlMode::Menu => {
+                let menu_cmd = menu_cmd.expect("menu command was resolved");
+                loop {
+                    match menu_select_stop(menu_cmd.as_str()) {
+                        Ok(true) => break,
+                        Ok(false) => thread::sleep(Duration::from_millis(100)),
+                        Err(error) => {
+                            eprintln!("error: {error}");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
         stop.store(true, Ordering::SeqCst);
         let _ = write_end.write_all(&[1]);
     });
     Ok(read_end)
+}
+
+fn spawn_grim_action_controller(config: &Config) -> Result<mpsc::Receiver<GrimAction>, String> {
+    let control = config.control;
+    let menu_cmd = if control == ControlMode::Menu {
+        Some(resolve_menu_cmd(config.menu_cmd.as_deref())?)
+    } else {
+        None
+    };
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || match control {
+        ControlMode::Stdin => loop {
+            eprintln!(
+                "Press Enter to capture next, 'f' then Enter to finish, 'q' then Enter to abort."
+            );
+            let mut input = String::new();
+            let Ok(bytes) = io::stdin().read_line(&mut input) else {
+                let _ = tx.send(GrimAction::Finish);
+                break;
+            };
+            let action = if bytes == 0 {
+                GrimAction::Finish
+            } else {
+                match input.trim() {
+                    "f" | "finish" => GrimAction::Finish,
+                    "q" | "abort" => GrimAction::Abort,
+                    _ => GrimAction::Next,
+                }
+            };
+            let done = !matches!(action, GrimAction::Next);
+            if tx.send(action).is_err() || done {
+                break;
+            }
+        },
+        ControlMode::Menu => {
+            let menu_cmd = menu_cmd.expect("menu command was resolved");
+            loop {
+                match menu_select_grim_action(&menu_cmd) {
+                    Ok(Some(action)) => {
+                        let done = !matches!(action, GrimAction::Next);
+                        if tx.send(action).is_err() || done {
+                            break;
+                        }
+                    }
+                    Ok(None) => thread::sleep(Duration::from_millis(100)),
+                    Err(error) => {
+                        eprintln!("error: {error}");
+                        let _ = tx.send(GrimAction::Finish);
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    Ok(rx)
+}
+
+fn wait_for_grim_action(
+    rx: &mpsc::Receiver<GrimAction>,
+    mut capturer: Option<&mut FrameCapturer>,
+    stitcher: &Stitcher,
+    preview: bool,
+    preview_width: u32,
+    preview_view: &mut PreviewView,
+) -> Result<Option<GrimAction>, String> {
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(action) => return Ok(Some(action)),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if preview {
+                    handle_preview_events(
+                        capturer.as_deref_mut(),
+                        stitcher,
+                        preview_width,
+                        preview_view,
+                    )?;
+                }
+            }
+        }
+    }
+}
+
+fn resolve_menu_cmd(menu_cmd: Option<&str>) -> Result<String, String> {
+    if let Some(cmd) = menu_cmd.filter(|cmd| !cmd.trim().is_empty()) {
+        return Ok(cmd.to_string());
+    }
+    for cmd in ["fuzzel", "rofi", "wofi"] {
+        if Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {cmd} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+        {
+            return Ok(cmd.to_string());
+        }
+    }
+    Err("no menu command found for --control menu".to_string())
+}
+
+fn menu_select_stop(menu_cmd: &str) -> Result<bool, String> {
+    let choice = menu_select(menu_cmd, "Recording", &["Stop"], true)?;
+    Ok(choice.as_deref() == Some("Stop"))
+}
+
+fn menu_select_grim_action(menu_cmd: &str) -> Result<Option<GrimAction>, String> {
+    let choice = menu_select(
+        menu_cmd,
+        "Grim Mode",
+        &["Capture Next", "Finish", "Abort"],
+        false,
+    )?;
+    Ok(match choice.as_deref() {
+        Some("Capture Next") => Some(GrimAction::Next),
+        Some("Finish") => Some(GrimAction::Finish),
+        Some("Abort") => Some(GrimAction::Abort),
+        _ => None,
+    })
+}
+
+fn menu_select(
+    menu_cmd: &str,
+    prompt: &str,
+    items: &[&str],
+    stop_menu: bool,
+) -> Result<Option<String>, String> {
+    let input = items.join("\n") + "\n";
+    let lines = items.len().max(1).to_string();
+    let prompt_colon = format!("{prompt}: ");
+    let mut command = if menu_cmd == "fuzzel" {
+        let mut command = Command::new("fuzzel");
+        command.args(["-d", "--anchor", "top", "--y-margin", "20"]);
+        if stop_menu {
+            command.args(["--lines", "1", "--width", "12", "-p", "Recording "]);
+        } else {
+            command.args(["--lines", &lines, "-p", &prompt_colon]);
+        }
+        command
+    } else if menu_cmd == "rofi" {
+        let mut command = Command::new("rofi");
+        command.args(["-dmenu", "-disable-history", "-p", prompt]);
+        if stop_menu {
+            command.args([
+                "-location",
+                "2",
+                "-yoffset",
+                "20",
+                "-theme-str",
+                "window {width: 250px;}",
+                "-l",
+                "1",
+            ]);
+        }
+        command
+    } else if menu_cmd == "wofi" {
+        let mut command = Command::new("wofi");
+        command.args(["-d", "-i", "-p", prompt, "--cache-file", "/dev/null"]);
+        if stop_menu {
+            command.args([
+                "-l", "top", "-y", "20", "-W", "250", "-H", "45", "--lines", "1",
+            ]);
+        } else {
+            command.args(["--lines", &lines]);
+        }
+        command
+    } else {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("{} -p '{}: '", menu_cmd, prompt));
+        command
+    };
+    command.stdin(Stdio::piped()).stdout(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("failed to start menu command '{menu_cmd}': {error}"))?;
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|error| format!("failed to write menu input: {error}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to read menu output: {error}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let choice = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if choice.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(choice))
+    }
 }
 
 fn capture_and_stitch(
@@ -1143,6 +1351,16 @@ impl Stitcher {
                     if edge.diff <= 9.0 {
                         pos = edge.pos;
                     } else {
+                        if let Some(result) = self.try_edge_append_down(
+                            &frame,
+                            &frame_cols,
+                            signature,
+                            old_anchor,
+                            frame_len,
+                            min_overlap,
+                        ) {
+                            return result;
+                        }
                         return StitchResult {
                             status: StitchStatus::NoMatch,
                             added: 0,
@@ -1152,6 +1370,16 @@ impl Stitcher {
                         };
                     }
                 } else {
+                    if let Some(result) = self.try_edge_append_down(
+                        &frame,
+                        &frame_cols,
+                        signature,
+                        old_anchor,
+                        frame_len,
+                        min_overlap,
+                    ) {
+                        return result;
+                    }
                     return StitchResult {
                         status: StitchStatus::NoMatch,
                         added: 0,
@@ -1181,6 +1409,16 @@ impl Stitcher {
                         frame_len,
                     };
                 }
+            }
+            if let Some(result) = self.try_edge_append_down(
+                &frame,
+                &frame_cols,
+                signature,
+                old_anchor,
+                frame_len,
+                min_overlap,
+            ) {
+                return result;
             }
             return StitchResult {
                 status: StitchStatus::NoMatch,
@@ -1226,6 +1464,16 @@ impl Stitcher {
                         frame_len,
                     };
                 }
+            }
+            if let Some(result) = self.try_edge_append_down(
+                &frame,
+                &frame_cols,
+                signature,
+                old_anchor,
+                frame_len,
+                min_overlap,
+            ) {
+                return result;
             }
             return StitchResult {
                 status: StitchStatus::NoMatch,
@@ -1524,6 +1772,62 @@ impl Stitcher {
         Some(best)
     }
 
+    fn try_edge_append_down(
+        &mut self,
+        frame: &Image,
+        frame_cols: &[[f32; 3]],
+        signature: Vec<u8>,
+        old_anchor: i32,
+        frame_len: u32,
+        min_overlap: i32,
+    ) -> Option<StitchResult> {
+        let full = self.full.as_ref()?;
+        if full.width() != frame.width() {
+            return None;
+        }
+        let overlap = edge_overlap_tail_head(full, frame, min_overlap as u32)?;
+        let amount = frame.height().saturating_sub(overlap);
+        let pos = full.height() as i32 - overlap as i32;
+        if amount == 0 {
+            self.anchor_pos = pos;
+            self.last_offset = pos - old_anchor;
+            self.last_cols = frame_cols.to_vec();
+            self.last_signature = Some(signature);
+            self.pending_edge = None;
+            return Some(StitchResult {
+                status: StitchStatus::NoProgress,
+                added: 0,
+                edge: None,
+                position: pos,
+                frame_len,
+            });
+        }
+        if amount < 15 {
+            return Some(StitchResult {
+                status: StitchStatus::NoProgress,
+                added: 0,
+                edge: Some(Edge::End),
+                position: pos,
+                frame_len,
+            });
+        }
+        self.append_end(frame, frame_cols, amount);
+        self.anchor_pos = pos;
+        self.last_cols = frame_cols.to_vec();
+        self.last_signature = Some(signature);
+        self.last_offset = pos - old_anchor;
+        self.pending_edge = None;
+        self.growth_edge = Some(Edge::End);
+        self.accepted += 1;
+        Some(StitchResult {
+            status: StitchStatus::Appended,
+            added: amount,
+            edge: Some(Edge::End),
+            position: pos,
+            frame_len,
+        })
+    }
+
     fn append_end(&mut self, frame: &Image, frame_cols: &[[f32; 3]], amount: u32) {
         let full = self.full.take().expect("full image exists");
         let width = full.width();
@@ -1568,6 +1872,77 @@ impl Stitcher {
 
 fn effective_min_overlap(frame_height: i32) -> i32 {
     100.min(12.max(frame_height / 4))
+}
+
+fn edge_overlap_tail_head(base: &Image, next: &Image, min_overlap: u32) -> Option<u32> {
+    let search_h = base.height().min(next.height());
+    if search_h <= min_overlap || base.width() == 0 || next.width() == 0 {
+        return None;
+    }
+    let samples = base.width().min(160).max(1);
+    let base_edges = edge_rows(base, base.height() - search_h, search_h, samples);
+    let next_edges = edge_rows(next, 0, search_h, samples);
+    let mut best_overlap = 0;
+    let mut best_diff = f32::INFINITY;
+
+    for overlap in min_overlap..search_h {
+        let base_start = search_h - overlap;
+        let next_start = 0;
+        let base_slice =
+            &base_edges[(base_start * samples) as usize..(search_h * samples) as usize];
+        let next_slice = &next_edges
+            [(next_start * samples) as usize..((next_start + overlap) * samples) as usize];
+        let active = base_slice.iter().filter(|value| **value > 18).count()
+            + next_slice.iter().filter(|value| **value > 18).count();
+        if active < 24 {
+            continue;
+        }
+        let diff = edge_diff(base_slice, next_slice);
+        if diff < best_diff {
+            best_diff = diff;
+            best_overlap = overlap;
+        }
+    }
+
+    if best_overlap > 0 && best_diff <= 16.0 {
+        Some(best_overlap)
+    } else {
+        None
+    }
+}
+
+fn edge_rows(image: &Image, start_y: u32, height: u32, samples: u32) -> Vec<u8> {
+    let mut rows = Vec::with_capacity((height * samples) as usize);
+    for local_y in 0..height {
+        let y = start_y + local_y;
+        let prev_y = y.saturating_sub(1);
+        let mut previous = None;
+        for step in 0..samples {
+            let x = if samples == 1 {
+                0
+            } else {
+                ((step as u64 * (image.width() - 1) as u64) / (samples - 1) as u64) as u32
+            };
+            let gray = gray_pixel_alpha(image.get_pixel(x, y));
+            let left = previous.unwrap_or(gray);
+            let up = gray_pixel_alpha(image.get_pixel(x, prev_y));
+            let edge = (gray - left).abs() + (gray - up).abs();
+            rows.push(edge.min(255.0).round() as u8);
+            previous = Some(gray);
+        }
+    }
+    rows
+}
+
+fn edge_diff(a: &[u8], b: &[u8]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return f32::INFINITY;
+    }
+    let mut total = 0u64;
+    for (left, right) in a.iter().zip(b.iter()) {
+        total += left.abs_diff(*right) as u64;
+    }
+    total as f32 / a.len() as f32
 }
 
 fn compute_cols(image: &Image) -> Vec<[f32; 3]> {
@@ -1631,6 +2006,11 @@ fn pad_width(image: &Image, width: u32) -> Image {
 
 fn gray_pixel(pixel: &Rgba<u8>) -> f32 {
     0.299 * pixel[0] as f32 + 0.587 * pixel[1] as f32 + 0.114 * pixel[2] as f32
+}
+
+fn gray_pixel_alpha(pixel: &Rgba<u8>) -> f32 {
+    let alpha = pixel[3] as f32 / 255.0;
+    gray_pixel(pixel) * alpha + 255.0 * (1.0 - alpha)
 }
 
 fn col_diff(cols1: &[[f32; 3]], cols2: &[[f32; 3]], offset: i32, min_overlap: i32) -> f32 {
@@ -1886,6 +2266,27 @@ mod tests {
             }
         }
         image
+    }
+
+    fn edge_pattern_frame(first_row: u32, height: u32) -> Image {
+        let width = 64;
+        let mut image = Image::new(width, height);
+        for y in 0..height {
+            let global_y = first_row + y;
+            for x in 0..width {
+                let mark = (x + global_y * 3) % 17 == 0 || (x * 5 + global_y) % 29 == 0;
+                let value = if mark { 20 } else { 235 };
+                image.put_pixel(x, y, Rgba([value, value, value, 255]));
+            }
+        }
+        image
+    }
+
+    #[test]
+    fn edge_overlap_matches_tail_to_head() {
+        let base = edge_pattern_frame(0, 80);
+        let next = edge_pattern_frame(50, 80);
+        assert_eq!(edge_overlap_tail_head(&base, &next, 12), Some(30));
     }
 
     #[test]

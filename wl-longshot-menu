@@ -3,6 +3,7 @@ set -euo pipefail
 
 APP_NAME="wl-longshot-menu"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/wl-longshot"
+MENU_MIN_LINES=1
 FILE_BACKEND="$CONFIG_DIR/backend"
 FILE_ACTION="$CONFIG_DIR/action"
 FILE_LIVE_PREVIEW="$CONFIG_DIR/live_preview"
@@ -79,6 +80,14 @@ find_menu() {
 show_menu() {
     local prompt="$1" items="$2" cmd
     cmd="$(find_menu || true)"
+    local lines=1 rest="$items"
+    while [[ "$rest" == *\\n* ]]; do
+        lines=$((lines + 1))
+        rest="${rest#*\\n}"
+    done
+    if (( lines < MENU_MIN_LINES )); then
+        lines=$MENU_MIN_LINES
+    fi
     if [[ "$cmd" == cli || ( -z "$cmd" && -t 0 ) ]]; then
         local -a options=()
         local line idx answer
@@ -100,13 +109,13 @@ show_menu() {
         die "No GUI menu found and not running in an interactive terminal"
     fi
     if [[ -n "$MENU_CMD" && "$cmd" != fuzzel && "$cmd" != rofi && "$cmd" != wofi ]]; then
-        printf '%b\n' "$items" | sh -c "$cmd"
+        printf '%b\n' "$items" | sh -c "$cmd -p '$prompt: '"
         return
     fi
     case "$(basename -- "$cmd")" in
-        fuzzel) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt: " ;;
-        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -p "$prompt" ;;
-        wofi) printf '%b\n' "$items" | "$cmd" --dmenu --prompt "$prompt" ;;
+        fuzzel) printf '%b\n' "$items" | "$cmd" -d --anchor top --y-margin 20 --lines "$lines" -p "$prompt: " ;;
+        rofi) printf '%b\n' "$items" | "$cmd" -dmenu -disable-history -p "$prompt" ;;
+        wofi) printf '%b\n' "$items" | "$cmd" -d -i -p "$prompt" --lines "$lines" --cache-file /dev/null ;;
     esac
 }
 
@@ -124,6 +133,11 @@ run_capture() {
     grim_fixed="$(get_conf "$FILE_GRIM_FIXED_WIDTH" on)"
 
     local -a args=(--backend "$backend")
+    local control_menu
+    control_menu="$(find_menu || true)"
+    if [[ -n "$control_menu" && "$control_menu" != cli ]]; then
+        args+=(--control menu --menu-cmd "$control_menu")
+    fi
     [[ "$live" == on ]] && args+=(--preview) || args+=(--no-preview)
     case "$action" in preview) args+=(--open) ;; edit) args+=(--edit) ;; esac
     if [[ "$backend" == grim ]]; then
