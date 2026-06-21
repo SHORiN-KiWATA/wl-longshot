@@ -361,11 +361,6 @@ impl FrameCapturer {
         })
     }
 
-    pub fn set_geometry(&mut self, geometry: Rect) {
-        self.state.geometry = geometry;
-        self.state.target_index = self.state.find_target_output();
-    }
-
     fn pump_pending_events(&mut self) -> Result<(), String> {
         loop {
             let dispatched = self

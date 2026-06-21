@@ -684,7 +684,15 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             }
             let elapsed = started.elapsed();
             if elapsed < frame_interval {
-                thread::sleep(frame_interval - elapsed);
+                sleep_with_preview_events(
+                    frame_interval - elapsed,
+                    &stop,
+                    overlay.as_mut(),
+                    &stitcher,
+                    config.preview,
+                    config.preview_width,
+                    &mut preview_view,
+                )?;
             }
         }
 
@@ -718,7 +726,14 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
                 &mut preview_view,
             )?
         } else if let Some(menu_cmd) = &menu_cmd {
-            menu_select_grim_action(menu_cmd)?
+            wait_for_grim_menu_action(
+                menu_cmd.clone(),
+                overlay.as_mut(),
+                &stitcher,
+                config.preview,
+                config.preview_width,
+                &mut preview_view,
+            )?
         } else {
             None
         };
@@ -747,10 +762,6 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             "{},{} {}x{}",
             next_rect.x, next_rect.y, next_rect.width, next_rect.height
         );
-        if let Some(capturer) = overlay.as_mut() {
-            capturer.set_geometry(next_rect);
-        }
-
         let frame = grim_capture(&next_geometry)?;
         if config.grim_mode == GrimMode::Manual && !config.grim_dedup {
             stitcher.append_without_dedup(frame);
@@ -936,6 +947,63 @@ fn wait_for_grim_action(
             }
         }
     }
+}
+
+fn wait_for_grim_menu_action(
+    menu_cmd: String,
+    mut capturer: Option<&mut FrameCapturer>,
+    stitcher: &Stitcher,
+    preview: bool,
+    preview_width: u32,
+    preview_view: &mut PreviewView,
+) -> Result<Option<GrimAction>, String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(menu_select_grim_action(&menu_cmd));
+    });
+    loop {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if preview {
+                    handle_preview_events(
+                        capturer.as_deref_mut(),
+                        stitcher,
+                        preview_width,
+                        preview_view,
+                    )?;
+                }
+            }
+        }
+    }
+}
+
+fn sleep_with_preview_events(
+    duration: Duration,
+    stop: &AtomicBool,
+    mut capturer: Option<&mut FrameCapturer>,
+    stitcher: &Stitcher,
+    preview: bool,
+    preview_width: u32,
+    preview_view: &mut PreviewView,
+) -> Result<(), String> {
+    let step = Duration::from_millis(50);
+    let mut slept = Duration::ZERO;
+    while slept < duration && !stop.load(Ordering::SeqCst) {
+        let delay = (duration - slept).min(step);
+        thread::sleep(delay);
+        slept += delay;
+        if preview {
+            handle_preview_events(
+                capturer.as_deref_mut(),
+                stitcher,
+                preview_width,
+                preview_view,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn resolve_menu_cmd(menu_cmd: Option<&str>) -> Result<String, String> {
@@ -1248,19 +1316,19 @@ fn sync_preview_view(
     outcome: StitchResult,
     _preview_width: u32,
 ) {
-    let previous_capture_pos = view.capture_pos;
-    let previous_capture_len = view.capture_len;
     let moved = matches!(
         outcome.status,
-        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
-    ) && (outcome.position.max(0) as u32 != previous_capture_pos
-        || outcome.frame_len != previous_capture_len
-        || outcome.added > 0);
-    if matches!(
-        outcome.status,
-        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
-    ) {
-        view.capture_pos = outcome.position.max(0) as u32;
+        StitchStatus::FirstFrame | StitchStatus::Appended
+    );
+    if outcome.status == StitchStatus::FirstFrame {
+        view.capture_pos = 0;
+        view.capture_len = outcome.frame_len;
+    } else if outcome.status == StitchStatus::Appended {
+        view.capture_pos = if outcome.edge == Some(Edge::Start) {
+            0
+        } else {
+            outcome.position.max(0) as u32
+        };
         view.capture_len = outcome.frame_len;
     }
     if !view.following && moved {
@@ -1278,7 +1346,7 @@ fn sync_preview_view(
     }
     if !matches!(
         outcome.status,
-        StitchStatus::FirstFrame | StitchStatus::Appended | StitchStatus::NoProgress
+        StitchStatus::FirstFrame | StitchStatus::Appended
     ) {
         return;
     }
