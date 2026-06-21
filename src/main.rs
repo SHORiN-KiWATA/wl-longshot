@@ -1369,7 +1369,7 @@ fn force_preview_to_bottom(view: &mut PreviewView, stitcher: &Stitcher, frame_le
     view.following = true;
     view.frame_len = frame_len;
     view.edge = Some(Edge::End);
-    view.capture_len = frame_len;
+    view.capture_len = 0;
     view.capture_pos = full.height().saturating_sub(frame_len);
     view.scrub_pos = view.capture_pos.min(full.height().saturating_sub(1));
 }
@@ -2498,6 +2498,7 @@ mod tests {
         force_preview_to_bottom(&mut view, &stitcher, 80);
         assert!(view.following);
         assert_eq!(view.capture_pos, 80);
+        assert_eq!(view.capture_len, 0);
         assert_eq!(view.scrub_pos, 80);
         assert_eq!(view.edge, Some(Edge::End));
     }

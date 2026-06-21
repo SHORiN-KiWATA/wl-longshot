@@ -1364,7 +1364,7 @@ fn draw_preview_position_indicator(
     capture_len: u32,
     accent: [u8; 3],
 ) {
-    if image.height() == 0 || draw_height < 12 || draw_width < 8 {
+    if image.height() == 0 || capture_len == 0 || draw_height < 12 || draw_width < 8 {
         return;
     }
     let track_width = 3;
@@ -1417,19 +1417,17 @@ fn draw_preview_position_indicator(
         );
     }
 
-    if capture_len > 0 {
-        fill_rect(
-            buffer,
-            stride,
-            buffer_width,
-            buffer_height,
-            track_x.saturating_sub(1),
-            marker_y.min(y + 2 + usable_height.saturating_sub(marker_height)),
-            track_width + 2,
-            marker_height,
-            [accent[0], accent[1], accent[2], 205],
-        );
-    }
+    fill_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        track_x.saturating_sub(1),
+        marker_y.min(y + 2 + usable_height.saturating_sub(marker_height)),
+        track_width + 2,
+        marker_height,
+        [accent[0], accent[1], accent[2], 205],
+    );
 }
 
 fn blit_latest_viewport(
