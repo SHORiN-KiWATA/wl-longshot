@@ -767,6 +767,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             stitcher.append_without_dedup(frame);
             write_stream_update(stream.as_mut(), &stitcher)?;
             if config.preview {
+                force_preview_to_bottom(&mut preview_view, &stitcher, next_rect.height as u32);
                 update_preview(
                     overlay.as_mut(),
                     &stitcher,
@@ -785,6 +786,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
                 write_stream_update(stream.as_mut(), &stitcher)?;
             }
             if config.preview {
+                force_preview_to_bottom(&mut preview_view, &stitcher, next_rect.height as u32);
                 update_preview(
                     overlay.as_mut(),
                     &stitcher,
@@ -803,6 +805,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
                 write_stream_update(stream.as_mut(), &stitcher)?;
             }
             if config.preview {
+                force_preview_to_bottom(&mut preview_view, &stitcher, next_rect.height as u32);
                 update_preview(
                     overlay.as_mut(),
                     &stitcher,
@@ -1357,6 +1360,18 @@ fn sync_preview_view(
     view.scrub_pos = view.capture_pos.min(full.height().saturating_sub(1));
     view.frame_len = outcome.frame_len;
     view.edge = outcome.edge;
+}
+
+fn force_preview_to_bottom(view: &mut PreviewView, stitcher: &Stitcher, frame_len: u32) {
+    let Some(full) = stitcher.full.as_ref() else {
+        return;
+    };
+    view.following = true;
+    view.frame_len = frame_len;
+    view.edge = Some(Edge::End);
+    view.capture_len = frame_len;
+    view.capture_pos = full.height().saturating_sub(frame_len);
+    view.scrub_pos = view.capture_pos.min(full.height().saturating_sub(1));
 }
 
 fn preview_edge(edge: Option<Edge>) -> PreviewEdge {
@@ -2462,6 +2477,29 @@ mod tests {
         assert_eq!(view.capture_pos, 30);
         assert_eq!(view.capture_len, 80);
         assert_eq!(view.scrub_pos, 0);
+    }
+
+    #[test]
+    fn manual_append_forces_preview_to_bottom() {
+        let mut stitcher = Stitcher::new();
+        assert_eq!(
+            stitcher.push_frame_result(vertical_frame(0, 80)).status,
+            StitchStatus::FirstFrame
+        );
+        stitcher.append_without_dedup(vertical_frame(80, 80));
+
+        let mut view = PreviewView {
+            following: false,
+            scrub_pos: 10,
+            capture_pos: 10,
+            capture_len: 80,
+            ..Default::default()
+        };
+        force_preview_to_bottom(&mut view, &stitcher, 80);
+        assert!(view.following);
+        assert_eq!(view.capture_pos, 80);
+        assert_eq!(view.scrub_pos, 80);
+        assert_eq!(view.edge, Some(Edge::End));
     }
 
     #[test]
