@@ -1,7 +1,8 @@
 mod capture;
 
 use capture::{
-    FrameCapturer, OverlayConfig, PreviewConfig, PreviewEdge, PreviewOptions, Rect, parse_color,
+    FrameCapturer, OverlayConfig, PreviewConfig, PreviewCropEdge, PreviewEdge, PreviewOptions,
+    Rect, parse_color,
 };
 use image::{
     ImageBuffer, ImageEncoder, Rgba,
@@ -186,6 +187,10 @@ struct PreviewView {
     edge: Option<Edge>,
     capture_pos: u32,
     capture_len: u32,
+    crop_enabled: bool,
+    crop_top: u32,
+    crop_bottom: u32,
+    crop_image_height: u32,
 }
 
 impl Default for PreviewView {
@@ -198,6 +203,10 @@ impl Default for PreviewView {
             edge: None,
             capture_pos: 0,
             capture_len: 0,
+            crop_enabled: true,
+            crop_top: 0,
+            crop_bottom: 0,
+            crop_image_height: 0,
         }
     }
 }
@@ -588,6 +597,7 @@ fn run_frame_backend(config: &Config, output: &OutputTarget) -> Result<(), Strin
         stream.as_mut(),
         config.debug_timing.then_some(&mut timing),
     )?;
+    let image = crop_image_vertical(image, preview_view.crop_top, preview_view.crop_bottom)?;
     let write_start = Instant::now();
     write_png(&image, output)?;
     timing.write_png = write_start.elapsed();
@@ -699,6 +709,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         let image = stitcher
             .full
             .ok_or_else(|| "no frames captured from grim".to_string())?;
+        let image = crop_image_vertical(image, preview_view.crop_top, preview_view.crop_bottom)?;
         write_png(&image, output)?;
         post_process(config, output, &image)?;
         return Ok(());
@@ -825,6 +836,7 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
     let image = stitcher
         .full
         .ok_or_else(|| "no frames captured from grim".to_string())?;
+    let image = crop_image_vertical(image, preview_view.crop_top, preview_view.crop_bottom)?;
     write_png(&image, output)?;
     post_process(config, output, &image)?;
     Ok(())
@@ -1007,6 +1019,17 @@ fn sleep_with_preview_events(
         }
     }
     Ok(())
+}
+
+fn crop_image_vertical(image: Image, top: u32, bottom: u32) -> Result<Image, String> {
+    let height = image.height();
+    let top = top.min(height.saturating_sub(1));
+    let bottom = bottom.min(height.saturating_sub(top + 1));
+    let new_height = height.saturating_sub(top).saturating_sub(bottom);
+    if top == 0 && bottom == 0 {
+        return Ok(image);
+    }
+    Ok(imageops::crop_imm(&image, 0, top, image.width(), new_height).to_image())
 }
 
 fn resolve_menu_cmd(menu_cmd: Option<&str>) -> Result<String, String> {
@@ -1232,6 +1255,7 @@ fn update_preview(
     view: &mut PreviewView,
 ) -> Result<(), String> {
     if let (Some(capturer), Some(image)) = (capturer, stitcher.full.as_ref()) {
+        sync_crop_with_image_height(view, image.height());
         capturer.update_preview(
             image,
             PreviewOptions {
@@ -1246,6 +1270,9 @@ fn update_preview(
                 },
                 capture_pos: view.capture_pos,
                 capture_len: view.capture_len,
+                crop_enabled: view.crop_enabled,
+                crop_top: view.crop_top,
+                crop_bottom: view.crop_bottom,
             },
         )?;
     }
@@ -1272,7 +1299,26 @@ fn handle_preview_events(
         return Ok(());
     };
     let events = capturer.take_preview_events()?;
-    if !events.toggle_zoom && events.scroll_delta.abs() < f32::EPSILON {
+    sync_crop_with_image_height(view, image.height());
+    if let Some(drag) = events.crop_drag.filter(|_| view.crop_enabled) {
+        let image_height = image.height();
+        match drag.edge {
+            PreviewCropEdge::Top => {
+                view.crop_top = drag
+                    .source_y
+                    .min(image_height.saturating_sub(view.crop_bottom + 1));
+            }
+            PreviewCropEdge::Bottom => {
+                let bottom_source = drag
+                    .source_y
+                    .max(view.crop_top.saturating_add(1))
+                    .min(image_height);
+                view.crop_bottom = image_height.saturating_sub(bottom_source);
+            }
+        }
+    }
+    if !events.toggle_zoom && events.scroll_delta.abs() < f32::EPSILON && events.crop_drag.is_none()
+    {
         return Ok(());
     }
     if events.toggle_zoom {
@@ -1308,9 +1354,31 @@ fn handle_preview_events(
             },
             capture_pos: view.capture_pos,
             capture_len: view.capture_len,
+            crop_enabled: view.crop_enabled,
+            crop_top: view.crop_top,
+            crop_bottom: view.crop_bottom,
         },
     )?;
     Ok(())
+}
+
+fn sync_crop_with_image_height(view: &mut PreviewView, image_height: u32) {
+    if image_height == 0 {
+        view.crop_top = 0;
+        view.crop_bottom = 0;
+        view.crop_image_height = 0;
+        return;
+    }
+    if view.crop_image_height > 0 && image_height > view.crop_image_height && view.crop_bottom > 0 {
+        view.crop_bottom = view
+            .crop_bottom
+            .saturating_add(image_height - view.crop_image_height);
+    }
+    view.crop_top = view.crop_top.min(image_height.saturating_sub(1));
+    view.crop_bottom = view
+        .crop_bottom
+        .min(image_height.saturating_sub(view.crop_top + 1));
+    view.crop_image_height = image_height;
 }
 
 fn sync_preview_view(
@@ -2449,6 +2517,15 @@ mod tests {
         let base = edge_pattern_frame(0, 80);
         let next = edge_pattern_frame(50, 80);
         assert_eq!(edge_overlap_tail_head(&base, &next, 12), Some(30));
+    }
+
+    #[test]
+    fn crop_image_vertical_keeps_middle_rows() {
+        let image = vertical_frame(0, 10);
+        let cropped = crop_image_vertical(image, 2, 3).expect("cropped image");
+        assert_eq!(cropped.height(), 5);
+        assert_eq!(*cropped.get_pixel(0, 0), row_color(2));
+        assert_eq!(*cropped.get_pixel(0, 4), row_color(6));
     }
 
     #[test]

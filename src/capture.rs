@@ -44,6 +44,9 @@ pub struct PreviewOptions {
     pub edge: PreviewEdge,
     pub capture_pos: u32,
     pub capture_len: u32,
+    pub crop_enabled: bool,
+    pub crop_top: u32,
+    pub crop_bottom: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +60,19 @@ pub enum PreviewEdge {
 pub struct PreviewEvents {
     pub toggle_zoom: bool,
     pub scroll_delta: f32,
+    pub crop_drag: Option<PreviewCropDrag>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewCropEdge {
+    Top,
+    Bottom,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PreviewCropDrag {
+    pub edge: PreviewCropEdge,
+    pub source_y: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,6 +126,27 @@ struct PreviewLayout {
     y: i32,
     width: u32,
     height: u32,
+    visible: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum PreviewSpace {
+    Right(i32),
+    Left(i32),
+    Bottom(i32),
+    Top(i32),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PreviewInteraction {
+    image_height: u32,
+    padding: u32,
+    content_width: u32,
+    content_height: u32,
+    viewport: PreviewViewport,
+    crop_top: u32,
+    crop_bottom: u32,
+    crop_enabled: bool,
 }
 
 #[derive(Debug)]
@@ -133,8 +170,13 @@ struct CaptureState {
     preview: Option<PreviewState>,
     preview_width: u32,
     pointer_on_preview: bool,
+    pointer_x: f64,
+    pointer_y: f64,
     preview_toggle_zoom: bool,
     preview_scroll_delta: f32,
+    preview_crop_drag: Option<PreviewCropDrag>,
+    active_crop_drag: Option<PreviewCropEdge>,
+    preview_interaction: Option<PreviewInteraction>,
     accent_color: [u8; 3],
 }
 
@@ -201,8 +243,13 @@ impl FrameCapturer {
             preview: None,
             preview_width: overlay_config.preview.width,
             pointer_on_preview: false,
+            pointer_x: 0.0,
+            pointer_y: 0.0,
             preview_toggle_zoom: false,
             preview_scroll_delta: 0.0,
+            preview_crop_drag: None,
+            active_crop_drag: None,
+            preview_interaction: None,
             accent_color: overlay_config.color.unwrap_or_else(resolve_accent_color),
         };
 
@@ -358,6 +405,7 @@ impl FrameCapturer {
         Ok(PreviewEvents {
             toggle_zoom: std::mem::take(&mut self.state.preview_toggle_zoom),
             scroll_delta: std::mem::take(&mut self.state.preview_scroll_delta),
+            crop_drag: self.state.preview_crop_drag.take(),
         })
     }
 
@@ -404,6 +452,55 @@ impl FrameCapturer {
 }
 
 impl CaptureState {
+    fn crop_edge_at_pointer(&self) -> Option<PreviewCropEdge> {
+        let interaction = self.preview_interaction?;
+        if !interaction.crop_enabled {
+            return None;
+        }
+        let x = self.pointer_x.round() as i32;
+        let y = self.pointer_y.round() as i32;
+        let content_x = interaction.padding as i32;
+        let content_y = interaction.padding as i32;
+        if x < content_x || x >= content_x + interaction.content_width as i32 {
+            return None;
+        }
+        let handle_radius = 8;
+        if let Some(top_y) = crop_source_to_pointer_y(interaction, interaction.crop_top) {
+            if (y - (content_y + top_y as i32)).abs() <= handle_radius {
+                return Some(PreviewCropEdge::Top);
+            }
+        }
+        let bottom_source =
+            bottom_source_from_crop(interaction.crop_top, interaction.crop_bottom, interaction);
+        if let Some(bottom_y) = crop_source_to_pointer_y(interaction, bottom_source) {
+            if (y - (content_y + bottom_y as i32)).abs() <= handle_radius {
+                return Some(PreviewCropEdge::Bottom);
+            }
+        }
+        None
+    }
+
+    fn update_crop_drag(&mut self) {
+        let Some(edge) = self.active_crop_drag else {
+            return;
+        };
+        let Some(interaction) = self.preview_interaction else {
+            return;
+        };
+        if !interaction.crop_enabled {
+            return;
+        }
+        let relative_y = (self.pointer_y - interaction.padding as f64)
+            .round()
+            .clamp(0.0, interaction.content_height.saturating_sub(1) as f64)
+            as u32;
+        let source_y = interaction.viewport.source_start.saturating_add(
+            ((relative_y as u64 * interaction.viewport.source_len as u64)
+                / interaction.content_height.max(1) as u64) as u32,
+        );
+        self.preview_crop_drag = Some(PreviewCropDrag { edge, source_y });
+    }
+
     fn find_target_output(&self) -> Option<usize> {
         let center_x = self.geometry.x + self.geometry.width / 2;
         let center_y = self.geometry.y + self.geometry.height / 2;
@@ -524,6 +621,9 @@ impl CaptureState {
                 edge: PreviewEdge::None,
                 capture_pos: 0,
                 capture_len: 0,
+                crop_enabled: false,
+                crop_top: 0,
+                crop_bottom: 0,
             },
         );
         let surface = compositor.create_surface(qh, ());
@@ -609,6 +709,15 @@ impl CaptureState {
             .and_then(|index| self.outputs.get(index))
             .ok_or_else(|| "target output is unavailable".to_string())?;
         let layout = self.preview_layout(target, image.width(), image.height(), options);
+        if !layout.visible {
+            if let Some(preview) = self.preview.as_mut() {
+                preview.surface.attach(None, 0, 0);
+                preview.surface.commit();
+                preview.buffer = None;
+            }
+            self.preview_interaction = None;
+            return Ok(());
+        }
 
         {
             let preview = self.preview.as_mut().expect("preview exists");
@@ -634,7 +743,16 @@ impl CaptureState {
             options.edge,
             options.capture_pos,
             options.capture_len,
+            options.crop_enabled,
+            options.crop_top,
+            options.crop_bottom,
         );
+        self.preview_interaction = Some(preview_interaction(
+            image,
+            layout.width,
+            layout.height,
+            options,
+        ));
         let preview = self.preview.as_mut().expect("preview exists");
         preview.surface.attach(Some(&buffer.buffer), 0, 0);
         preview
@@ -654,58 +772,87 @@ impl CaptureState {
     ) -> PreviewLayout {
         let gap = 10;
         let padding = 8;
-        let content_width = if options.zoomed {
+        let desired_content_width = if options.zoomed {
             let output_limit = ((target.width.max(1) as u32) * 45 / 100).clamp(240, 720);
             options.width.max(output_limit).min(output_limit)
         } else {
             options.width.max(1)
         };
-        let scaled_height = scale_height_for_width(image_width, image_height, content_width);
-        let max_content_height = (self.geometry.height.max(1) as u32)
-            .saturating_sub(padding * 2)
-            .max(1);
-        let content_height = scaled_height.min(max_content_height).max(1);
-        let width = content_width + padding * 2;
-        let height = content_height + padding * 2;
         let local_x = self.geometry.x - target.x;
         let local_y = self.geometry.y - target.y;
         let rect_right = local_x + self.geometry.width;
         let rect_bottom = local_y + self.geometry.height;
-        let target_width = target.width.max(width as i32);
-        let target_height = target.height.max(height as i32);
+        let target_width = target.width.max(1);
+        let target_height = target.height.max(1);
+        let min_content_width = 80;
+        let spaces = [
+            PreviewSpace::Right(target_width.saturating_sub(rect_right).saturating_sub(gap)),
+            PreviewSpace::Left(local_x.saturating_sub(gap)),
+            PreviewSpace::Bottom(
+                target_height
+                    .saturating_sub(rect_bottom)
+                    .saturating_sub(gap),
+            ),
+            PreviewSpace::Top(local_y.saturating_sub(gap)),
+        ];
 
-        let (x, y) = if target_width - rect_right >= width as i32 + gap {
-            (
-                rect_right + gap,
-                local_y.clamp(0, target_height - height as i32),
-            )
-        } else if local_x >= width as i32 + gap {
-            (
-                local_x - width as i32 - gap,
-                local_y.clamp(0, target_height - height as i32),
-            )
-        } else if target_height - rect_bottom >= height as i32 + gap {
-            (
-                local_x.clamp(0, target_width - width as i32),
-                rect_bottom + gap,
-            )
-        } else if local_y >= height as i32 + gap {
-            (
-                local_x.clamp(0, target_width - width as i32),
-                local_y - height as i32 - gap,
-            )
-        } else {
-            (
-                (target_width - width as i32).max(0),
-                local_y.clamp(0, target_height - height as i32),
-            )
-        };
+        for space in spaces {
+            let available_width = match space {
+                PreviewSpace::Right(value) | PreviewSpace::Left(value) => value.max(0) as u32,
+                PreviewSpace::Bottom(_) | PreviewSpace::Top(_) => target_width as u32,
+            };
+            let available_height = match space {
+                PreviewSpace::Right(_) | PreviewSpace::Left(_) => {
+                    self.geometry.height.max(1) as u32
+                }
+                PreviewSpace::Bottom(value) | PreviewSpace::Top(value) => value.max(0) as u32,
+            };
+            let max_content_width = available_width.saturating_sub(padding * 2);
+            let content_width = desired_content_width.min(max_content_width);
+            if content_width < min_content_width {
+                continue;
+            }
+            let scaled_height = scale_height_for_width(image_width, image_height, content_width);
+            let max_content_height = available_height.saturating_sub(padding * 2);
+            if max_content_height < 32 {
+                continue;
+            }
+            let content_height = scaled_height.min(max_content_height).max(1);
+            let width = content_width + padding * 2;
+            let height = content_height + padding * 2;
+            let (x, y) = match space {
+                PreviewSpace::Right(_) => (
+                    rect_right + gap,
+                    local_y.clamp(0, target_height - height as i32),
+                ),
+                PreviewSpace::Left(_) => (
+                    local_x - width as i32 - gap,
+                    local_y.clamp(0, target_height - height as i32),
+                ),
+                PreviewSpace::Bottom(_) => (
+                    local_x.clamp(0, target_width - width as i32),
+                    rect_bottom + gap,
+                ),
+                PreviewSpace::Top(_) => (
+                    local_x.clamp(0, target_width - width as i32),
+                    local_y - height as i32 - gap,
+                ),
+            };
+            return PreviewLayout {
+                x,
+                y,
+                width,
+                height,
+                visible: true,
+            };
+        }
 
         PreviewLayout {
-            x,
-            y,
-            width,
-            height,
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            visible: false,
         }
     }
 
@@ -927,11 +1074,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for CaptureState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            wl_pointer::Event::Enter { surface, .. } => {
+            wl_pointer::Event::Enter {
+                surface,
+                surface_x,
+                surface_y,
+                ..
+            } => {
                 state.pointer_on_preview = state
                     .preview
                     .as_ref()
                     .is_some_and(|preview| preview.surface == surface);
+                state.pointer_x = surface_x;
+                state.pointer_y = surface_y;
             }
             wl_pointer::Event::Leave { surface, .. } => {
                 if state
@@ -940,6 +1094,18 @@ impl Dispatch<wl_pointer::WlPointer, ()> for CaptureState {
                     .is_some_and(|preview| preview.surface == surface)
                 {
                     state.pointer_on_preview = false;
+                    state.active_crop_drag = None;
+                }
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_x = surface_x;
+                state.pointer_y = surface_y;
+                if state.pointer_on_preview {
+                    state.update_crop_drag();
                 }
             }
             wl_pointer::Event::Button {
@@ -949,8 +1115,17 @@ impl Dispatch<wl_pointer::WlPointer, ()> for CaptureState {
             } => {
                 let pressed =
                     matches!(button_state, WEnum::Value(wl_pointer::ButtonState::Pressed));
-                if state.pointer_on_preview && pressed && button == 0x110 {
-                    state.preview_toggle_zoom = true;
+                if state.pointer_on_preview && button == 0x110 {
+                    if pressed {
+                        state.active_crop_drag = state.crop_edge_at_pointer();
+                        if state.active_crop_drag.is_some() {
+                            state.update_crop_drag();
+                        } else {
+                            state.preview_toggle_zoom = true;
+                        }
+                    } else {
+                        state.active_crop_drag = None;
+                    }
                 }
             }
             wl_pointer::Event::Axis { axis, value, .. } => {
@@ -1282,6 +1457,9 @@ fn draw_preview_image(
     edge: PreviewEdge,
     capture_pos: u32,
     capture_len: u32,
+    crop_enabled: bool,
+    crop_top: u32,
+    crop_bottom: u32,
 ) {
     buffer.fill(0);
     fill_rect(
@@ -1334,6 +1512,23 @@ fn draw_preview_image(
         capture_len,
         accent,
     );
+    if crop_enabled {
+        draw_crop_overlay(
+            buffer,
+            stride,
+            width,
+            height,
+            image,
+            padding,
+            padding,
+            content_width,
+            content_height,
+            viewport,
+            crop_top,
+            crop_bottom,
+            accent,
+        );
+    }
 
     stroke_rect(
         buffer,
@@ -1347,6 +1542,404 @@ fn draw_preview_image(
         2,
         [accent[0], accent[1], accent[2], 77],
     );
+}
+
+fn preview_interaction(
+    image: &Image,
+    width: u32,
+    height: u32,
+    options: PreviewOptions,
+) -> PreviewInteraction {
+    let padding = 8;
+    let content_width = width.saturating_sub(padding * 2).max(1);
+    let content_height = height.saturating_sub(padding * 2).max(1);
+    let viewport = preview_viewport(
+        image,
+        content_width,
+        content_height,
+        options.source_pos,
+        options.frame_len,
+        options.edge,
+    );
+    PreviewInteraction {
+        image_height: image.height(),
+        padding,
+        content_width,
+        content_height,
+        viewport,
+        crop_top: options.crop_top,
+        crop_bottom: options.crop_bottom,
+        crop_enabled: options.crop_enabled,
+    }
+}
+
+fn bottom_source_from_crop(
+    crop_top: u32,
+    crop_bottom: u32,
+    interaction: PreviewInteraction,
+) -> u32 {
+    interaction
+        .image_height
+        .saturating_sub(crop_bottom)
+        .max(crop_top.saturating_add(1))
+}
+
+fn crop_source_to_pointer_y(interaction: PreviewInteraction, source_y: u32) -> Option<u32> {
+    let start = interaction.viewport.source_start;
+    let end = start.saturating_add(interaction.viewport.source_len);
+    if source_y < start || source_y > end {
+        return None;
+    }
+    Some(source_to_draw_y(
+        source_y,
+        start,
+        interaction.viewport.source_len,
+        interaction.content_height,
+    ))
+}
+
+fn draw_crop_overlay(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    image: &Image,
+    x: u32,
+    y: u32,
+    draw_width: u32,
+    draw_height: u32,
+    viewport: PreviewViewport,
+    crop_top: u32,
+    crop_bottom: u32,
+    accent: [u8; 3],
+) {
+    if image.height() == 0 || draw_width == 0 || draw_height == 0 {
+        return;
+    }
+    let max_crop_top = image.height().saturating_sub(1);
+    let crop_top = crop_top.min(max_crop_top);
+    let crop_bottom = crop_bottom.min(image.height().saturating_sub(crop_top + 1));
+    let bottom_source = image.height().saturating_sub(crop_bottom);
+
+    if crop_top > viewport.source_start {
+        let hidden_end = crop_top.min(viewport.source_start.saturating_add(viewport.source_len));
+        if hidden_end > viewport.source_start {
+            let hidden_height = source_span_to_draw_len(
+                viewport.source_start,
+                hidden_end,
+                viewport.source_start,
+                viewport.source_len,
+                draw_height,
+            );
+            fill_rect(
+                buffer,
+                stride,
+                buffer_width,
+                buffer_height,
+                x,
+                y,
+                draw_width,
+                hidden_height,
+                [0, 0, 0, 140],
+            );
+        }
+    }
+    if bottom_source < viewport.source_start.saturating_add(viewport.source_len) {
+        let hidden_start = bottom_source.max(viewport.source_start);
+        if hidden_start < viewport.source_start.saturating_add(viewport.source_len) {
+            let line_y = source_to_draw_y(
+                hidden_start,
+                viewport.source_start,
+                viewport.source_len,
+                draw_height,
+            );
+            fill_rect(
+                buffer,
+                stride,
+                buffer_width,
+                buffer_height,
+                x,
+                y + line_y,
+                draw_width,
+                draw_height.saturating_sub(line_y),
+                [0, 0, 0, 140],
+            );
+        }
+    }
+
+    if (viewport.source_start..=viewport.source_start.saturating_add(viewport.source_len))
+        .contains(&crop_top)
+    {
+        draw_crop_handle(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            x,
+            y + source_to_draw_y(
+                crop_top,
+                viewport.source_start,
+                viewport.source_len,
+                draw_height,
+            ),
+            draw_width,
+            accent,
+        );
+    }
+    if (viewport.source_start..=viewport.source_start.saturating_add(viewport.source_len))
+        .contains(&bottom_source)
+    {
+        draw_crop_handle(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            x,
+            y + source_to_draw_y(
+                bottom_source,
+                viewport.source_start,
+                viewport.source_len,
+                draw_height,
+            ),
+            draw_width,
+            accent,
+        );
+    }
+}
+
+fn draw_crop_handle(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    accent: [u8; 3],
+) {
+    const HANDLE_BG: [u8; 4] = [18, 18, 18, 220];
+    const HANDLE_HIGHLIGHT: [u8; 4] = [255, 255, 255, 210];
+    let crop_line = [accent[0], accent[1], accent[2], 180];
+
+    let line_y = y.saturating_sub(1);
+    fill_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        x,
+        line_y,
+        width,
+        3,
+        crop_line,
+    );
+
+    let handle_width = width.clamp(44, 76);
+    let handle_height = 13;
+    let handle_x = x + width.saturating_sub(handle_width) / 2;
+    let handle_y = y.saturating_sub(handle_height / 2);
+    fill_rounded_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        handle_x,
+        handle_y,
+        handle_width,
+        handle_height,
+        handle_height / 2,
+        HANDLE_BG,
+    );
+    stroke_rounded_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        handle_x,
+        handle_y,
+        handle_width,
+        handle_height,
+        2,
+        handle_height / 2,
+        crop_line,
+    );
+
+    let grip_x = handle_x + handle_width / 2;
+    for offset in [-8_i32, 0, 8] {
+        fill_rect(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            (grip_x as i32 + offset).max(0) as u32,
+            handle_y + 4,
+            3,
+            5,
+            HANDLE_HIGHLIGHT,
+        );
+    }
+
+    fill_rect(
+        buffer,
+        stride,
+        buffer_width,
+        buffer_height,
+        x,
+        line_y,
+        width,
+        1,
+        [accent[0], accent[1], accent[2], 110],
+    );
+}
+
+fn fill_rounded_rect(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    radius: u32,
+    rgba: [u8; 4],
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    let right = x.saturating_add(width);
+    let bottom = y.saturating_add(height);
+    for py in y..bottom.min(buffer_height) {
+        for px in x..right.min(buffer_width) {
+            if rounded_rect_contains(px - x, py - y, width, height, radius) {
+                put_argb_pixel(buffer, stride, px, py, rgba);
+            }
+        }
+    }
+}
+
+fn stroke_rounded_rect(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    line_width: u32,
+    radius: u32,
+    rgba: [u8; 4],
+) {
+    for inset in 0..line_width.max(1) {
+        let inset_width = width.saturating_sub(inset * 2);
+        let inset_height = height.saturating_sub(inset * 2);
+        if inset_width == 0 || inset_height == 0 {
+            break;
+        }
+        draw_rounded_rect_outline(
+            buffer,
+            stride,
+            buffer_width,
+            buffer_height,
+            x + inset,
+            y + inset,
+            inset_width,
+            inset_height,
+            radius.saturating_sub(inset),
+            rgba,
+        );
+    }
+}
+
+fn draw_rounded_rect_outline(
+    buffer: &mut [u8],
+    stride: usize,
+    buffer_width: u32,
+    buffer_height: u32,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    radius: u32,
+    rgba: [u8; 4],
+) {
+    if width == 0 || height == 0 {
+        return;
+    }
+    let radius = radius.min(width / 2).min(height / 2);
+    let right = x.saturating_add(width);
+    let bottom = y.saturating_add(height);
+    for py in y..bottom.min(buffer_height) {
+        for px in x..right.min(buffer_width) {
+            let local_x = px - x;
+            let local_y = py - y;
+            if rounded_rect_contains(local_x, local_y, width, height, radius)
+                && is_rounded_rect_edge(local_x, local_y, width, height, radius)
+            {
+                put_argb_pixel(buffer, stride, px, py, rgba);
+            }
+        }
+    }
+}
+
+fn rounded_rect_contains(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool {
+    if radius == 0 {
+        return x < width && y < height;
+    }
+    let left = radius;
+    let right = width.saturating_sub(radius + 1);
+    let top = radius;
+    let bottom = height.saturating_sub(radius + 1);
+    if (left..=right).contains(&x) || (top..=bottom).contains(&y) {
+        return true;
+    }
+    let cx = if x < left { left } else { right } as i32;
+    let cy = if y < top { top } else { bottom } as i32;
+    let dx = x as i32 - cx;
+    let dy = y as i32 - cy;
+    dx * dx + dy * dy <= radius as i32 * radius as i32
+}
+
+fn is_rounded_rect_edge(x: u32, y: u32, width: u32, height: u32, radius: u32) -> bool {
+    if width <= 2 || height <= 2 {
+        return true;
+    }
+    x == 0
+        || y == 0
+        || x + 1 == width
+        || y + 1 == height
+        || !rounded_rect_contains(x.saturating_sub(1), y, width, height, radius)
+        || !rounded_rect_contains(x.saturating_add(1), y, width, height, radius)
+        || !rounded_rect_contains(x, y.saturating_sub(1), width, height, radius)
+        || !rounded_rect_contains(x, y.saturating_add(1), width, height, radius)
+}
+
+fn source_span_to_draw_len(
+    start: u32,
+    end: u32,
+    viewport_start: u32,
+    viewport_len: u32,
+    draw_height: u32,
+) -> u32 {
+    let start_y = source_to_draw_y(start, viewport_start, viewport_len, draw_height);
+    let end_y = source_to_draw_y(end, viewport_start, viewport_len, draw_height);
+    end_y.saturating_sub(start_y).max(1)
+}
+
+fn source_to_draw_y(
+    source_y: u32,
+    viewport_start: u32,
+    viewport_len: u32,
+    draw_height: u32,
+) -> u32 {
+    if viewport_len == 0 {
+        return 0;
+    }
+    let relative = source_y.saturating_sub(viewport_start).min(viewport_len);
+    ((relative as u64 * draw_height as u64) / viewport_len as u64)
+        .min(draw_height.saturating_sub(1) as u64) as u32
 }
 
 fn draw_preview_position_indicator(
@@ -1464,7 +2057,7 @@ fn blit_latest_viewport(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct PreviewViewport {
     scaled_height: u32,
     scaled_start: u32,
