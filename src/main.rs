@@ -26,6 +26,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const APP_NAME: &str = "wl-longshot";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_FPS: u32 = 15;
+const PREVIEW_UI_TICK: Duration = Duration::from_millis(8);
 const CLIPBOARD_MAX_PIXELS: u64 = 24_000_000;
 const CLIPBOARD_MAX_HEIGHT: u32 = 16_000;
 
@@ -947,7 +948,7 @@ fn wait_for_grim_action(
     preview_view: &mut PreviewView,
 ) -> Result<Option<GrimAction>, String> {
     loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        match rx.recv_timeout(PREVIEW_UI_TICK) {
             Ok(action) => return Ok(Some(action)),
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -977,7 +978,7 @@ fn wait_for_grim_menu_action(
         let _ = tx.send(menu_select_grim_action(&menu_cmd));
     });
     loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        match rx.recv_timeout(PREVIEW_UI_TICK) {
             Ok(result) => return result,
             Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -1003,7 +1004,7 @@ fn sleep_with_preview_events(
     preview_width: u32,
     preview_view: &mut PreviewView,
 ) -> Result<(), String> {
-    let step = Duration::from_millis(50);
+    let step = PREVIEW_UI_TICK;
     let mut slept = Duration::ZERO;
     while slept < duration && !stop.load(Ordering::SeqCst) {
         let delay = (duration - slept).min(step);
@@ -1230,7 +1231,17 @@ fn capture_and_stitch(
                     update_preview(Some(capturer), &stitcher, preview_width, preview_view)?;
                     handle_preview_events(Some(capturer), &stitcher, preview_width, preview_view)?;
                 }
-                capturer.sleep_frame_interval(|| stop.load(Ordering::SeqCst));
+                if capturer.fps() > 0 {
+                    sleep_with_preview_events(
+                        Duration::from_nanos(1_000_000_000 / capturer.fps() as u64),
+                        &stop,
+                        Some(capturer),
+                        &stitcher,
+                        preview,
+                        preview_width,
+                        preview_view,
+                    )?;
+                }
             }
             None => break,
         }
@@ -1459,8 +1470,8 @@ fn preview_scroll_amount(
     zoomed: bool,
     capture_len: u32,
 ) -> u32 {
-    let base = 16.max(estimated_preview_source_len(image, preview_width, zoomed, capture_len) / 8);
-    let notches = (delta.abs() / 15.0).max(0.35);
+    let base = 24.max(estimated_preview_source_len(image, preview_width, zoomed, capture_len) / 5);
+    let notches = (delta.abs() / 15.0).max(0.6);
     (notches * base as f32).round() as u32
 }
 

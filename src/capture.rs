@@ -5,8 +5,6 @@ use std::env;
 use std::fs;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
-use std::thread;
-use std::time::Duration;
 use tempfile::tempfile;
 use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
@@ -21,6 +19,8 @@ use wayland_protocols_wlr::screencopy::v1::client::{
 
 pub type Image = ImageBuffer<Rgba<u8>, Vec<u8>>;
 const APP_ID: &str = "wl-longshot";
+const PREVIEW_PADDING: u32 = 8;
+const PREVIEW_SCROLLBAR_GUTTER: u32 = 10;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OverlayConfig {
@@ -370,22 +370,8 @@ impl FrameCapturer {
         Ok(Some(image))
     }
 
-    pub fn sleep_frame_interval<F>(&self, mut should_stop: F)
-    where
-        F: FnMut() -> bool,
-    {
-        if self.fps == 0 {
-            return;
-        }
-        let total = Duration::from_nanos(1_000_000_000 / self.fps as u64);
-        let step = Duration::from_millis(5);
-        let mut slept = Duration::ZERO;
-        while slept < total && !should_stop() {
-            let remaining = total.saturating_sub(slept);
-            let delay = remaining.min(step);
-            thread::sleep(delay);
-            slept += delay;
-        }
+    pub fn fps(&self) -> u32 {
+        self.fps
     }
 
     pub fn update_preview(&mut self, image: &Image, options: PreviewOptions) -> Result<(), String> {
@@ -771,7 +757,7 @@ impl CaptureState {
         options: PreviewOptions,
     ) -> PreviewLayout {
         let gap = 10;
-        let padding = 8;
+        let padding = PREVIEW_PADDING;
         let desired_content_width = if options.zoomed {
             let output_limit = ((target.width.max(1) as u32) * 45 / 100).clamp(240, 720);
             options.width.max(output_limit).min(output_limit)
@@ -807,7 +793,9 @@ impl CaptureState {
                 }
                 PreviewSpace::Bottom(value) | PreviewSpace::Top(value) => value.max(0) as u32,
             };
-            let max_content_width = available_width.saturating_sub(padding * 2);
+            let max_content_width = available_width
+                .saturating_sub(padding * 2)
+                .saturating_sub(PREVIEW_SCROLLBAR_GUTTER);
             let content_width = desired_content_width.min(max_content_width);
             if content_width < min_content_width {
                 continue;
@@ -818,7 +806,7 @@ impl CaptureState {
                 continue;
             }
             let content_height = scaled_height.min(max_content_height).max(1);
-            let width = content_width + padding * 2;
+            let width = content_width + padding * 2 + PREVIEW_SCROLLBAR_GUTTER;
             let height = content_height + padding * 2;
             let (x, y) = match space {
                 PreviewSpace::Right(_) => (
@@ -1474,8 +1462,11 @@ fn draw_preview_image(
         [accent[0], accent[1], accent[2], 28],
     );
 
-    let padding = 8;
-    let content_width = width.saturating_sub(padding * 2).max(1);
+    let padding = PREVIEW_PADDING;
+    let content_width = width
+        .saturating_sub(padding * 2)
+        .saturating_sub(PREVIEW_SCROLLBAR_GUTTER)
+        .max(1);
     let content_height = height.saturating_sub(padding * 2).max(1);
     let viewport = preview_viewport(
         image,
@@ -1503,9 +1494,9 @@ fn draw_preview_image(
         width,
         height,
         image,
+        padding + content_width,
         padding,
-        padding,
-        content_width,
+        PREVIEW_SCROLLBAR_GUTTER,
         content_height,
         viewport,
         capture_pos,
@@ -1550,8 +1541,11 @@ fn preview_interaction(
     height: u32,
     options: PreviewOptions,
 ) -> PreviewInteraction {
-    let padding = 8;
-    let content_width = width.saturating_sub(padding * 2).max(1);
+    let padding = PREVIEW_PADDING;
+    let content_width = width
+        .saturating_sub(padding * 2)
+        .saturating_sub(PREVIEW_SCROLLBAR_GUTTER)
+        .max(1);
     let content_height = height.saturating_sub(padding * 2).max(1);
     let viewport = preview_viewport(
         image,
@@ -1960,8 +1954,8 @@ fn draw_preview_position_indicator(
     if image.height() == 0 || capture_len == 0 || draw_height < 12 || draw_width < 8 {
         return;
     }
-    let track_width = 3;
-    let track_x = x + draw_width.saturating_sub(track_width + 2);
+    let track_width = 4.min(draw_width.max(1));
+    let track_x = x + (draw_width.saturating_sub(track_width)) / 2;
     fill_rect(
         buffer,
         stride,
@@ -1971,7 +1965,7 @@ fn draw_preview_position_indicator(
         y + 2,
         track_width,
         draw_height.saturating_sub(4),
-        [255, 255, 255, 38],
+        [255, 255, 255, 70],
     );
 
     let usable_height = draw_height.saturating_sub(4);
@@ -2006,7 +2000,7 @@ fn draw_preview_position_indicator(
             thumb_y,
             track_width,
             thumb_height,
-            [255, 255, 255, 92],
+            [255, 255, 255, 140],
         );
     }
 
