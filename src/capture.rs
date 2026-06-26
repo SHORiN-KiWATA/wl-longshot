@@ -61,6 +61,7 @@ pub struct PreviewEvents {
     pub toggle_zoom: bool,
     pub scroll_delta: f32,
     pub crop_drag: Option<PreviewCropDrag>,
+    pub dragging_crop: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -386,12 +387,29 @@ impl FrameCapturer {
             .map_err(|error| format!("failed to flush preview overlay: {error}"))
     }
 
+    pub fn refresh_crop_drag(
+        &mut self,
+        image: &Image,
+        options: PreviewOptions,
+    ) -> Option<PreviewCropDrag> {
+        let preview = self.state.preview.as_ref()?;
+        self.state.preview_interaction = Some(preview_interaction(
+            image,
+            preview.width,
+            preview.height,
+            options,
+        ));
+        self.state.update_crop_drag();
+        self.state.preview_crop_drag.take()
+    }
+
     pub fn take_preview_events(&mut self) -> Result<PreviewEvents, String> {
         self.pump_pending_events()?;
         Ok(PreviewEvents {
             toggle_zoom: std::mem::take(&mut self.state.preview_toggle_zoom),
             scroll_delta: std::mem::take(&mut self.state.preview_scroll_delta),
             crop_drag: self.state.preview_crop_drag.take(),
+            dragging_crop: self.state.active_crop_drag.is_some(),
         })
     }
 

@@ -646,7 +646,14 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         .clone()
         .map(|dir| StreamWriter::new(dir, config.stream_keep_frames, config.stream_every))
         .transpose()?;
-    let first = grim_capture(&geometry)?;
+    let first = grim_capture_with_preview_events(
+        geometry.clone(),
+        overlay.as_mut(),
+        &stitcher,
+        config.preview,
+        config.preview_width,
+        &mut preview_view,
+    )?;
     stitcher.push_frame(first);
     write_stream_update(stream.as_mut(), &stitcher)?;
     if config.preview {
@@ -670,7 +677,14 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
         let frame_interval = Duration::from_secs_f64(1.0 / config.fps as f64);
         while !stop.load(Ordering::SeqCst) {
             let started = Instant::now();
-            let frame = grim_capture(&geometry)?;
+            let frame = grim_capture_with_preview_events(
+                geometry.clone(),
+                overlay.as_mut(),
+                &stitcher,
+                config.preview,
+                config.preview_width,
+                &mut preview_view,
+            )?;
             let outcome = stitcher.push_frame_result(frame);
             let accepted = outcome.accepted();
             if config.preview {
@@ -774,7 +788,14 @@ fn run_grim_backend(config: &Config, output: &OutputTarget) -> Result<(), String
             "{},{} {}x{}",
             next_rect.x, next_rect.y, next_rect.width, next_rect.height
         );
-        let frame = grim_capture(&next_geometry)?;
+        let frame = grim_capture_with_preview_events(
+            next_geometry,
+            overlay.as_mut(),
+            &stitcher,
+            config.preview,
+            config.preview_width,
+            &mut preview_view,
+        )?;
         if config.grim_mode == GrimMode::Manual && !config.grim_dedup {
             stitcher.append_without_dedup(frame);
             write_stream_update(stream.as_mut(), &stitcher)?;
@@ -859,6 +880,39 @@ fn grim_capture(geometry: &str) -> Result<Image, String> {
         .map_err(|error| format!("failed to decode grim PNG: {error}"))?
         .to_rgba8();
     Ok(image)
+}
+
+fn grim_capture_with_preview_events(
+    geometry: String,
+    mut capturer: Option<&mut FrameCapturer>,
+    stitcher: &Stitcher,
+    preview: bool,
+    preview_width: u32,
+    preview_view: &mut PreviewView,
+) -> Result<Image, String> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(grim_capture(&geometry));
+    });
+
+    loop {
+        match rx.recv_timeout(PREVIEW_UI_TICK) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("grim capture thread disconnected".to_string());
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if preview {
+                    handle_preview_events(
+                        capturer.as_deref_mut(),
+                        stitcher,
+                        preview_width,
+                        preview_view,
+                    )?;
+                }
+            }
+        }
+    }
 }
 
 fn run_slurp() -> Result<String, String> {
@@ -1312,21 +1366,7 @@ fn handle_preview_events(
     let events = capturer.take_preview_events()?;
     sync_crop_with_image_height(view, image.height());
     if let Some(drag) = events.crop_drag.filter(|_| view.crop_enabled) {
-        let image_height = image.height();
-        match drag.edge {
-            PreviewCropEdge::Top => {
-                view.crop_top = drag
-                    .source_y
-                    .min(image_height.saturating_sub(view.crop_bottom + 1));
-            }
-            PreviewCropEdge::Bottom => {
-                let bottom_source = drag
-                    .source_y
-                    .max(view.crop_top.saturating_add(1))
-                    .min(image_height);
-                view.crop_bottom = image_height.saturating_sub(bottom_source);
-            }
-        }
+        apply_crop_drag(view, image.height(), drag);
     }
     if !events.toggle_zoom && events.scroll_delta.abs() < f32::EPSILON && events.crop_drag.is_none()
     {
@@ -1351,26 +1391,50 @@ fn handle_preview_events(
         view.scrub_pos = view.scrub_pos.min(image.height().saturating_sub(1));
         view.following = false;
     }
-    capturer.update_preview(
-        image,
-        PreviewOptions {
-            width: preview_width,
-            zoomed: view.zoomed,
-            source_pos: view.scrub_pos,
-            frame_len: if view.following { view.frame_len } else { 0 },
-            edge: if view.following {
-                preview_edge(view.edge)
-            } else {
-                PreviewEdge::None
-            },
-            capture_pos: view.capture_pos,
-            capture_len: view.capture_len,
-            crop_enabled: view.crop_enabled,
-            crop_top: view.crop_top,
-            crop_bottom: view.crop_bottom,
-        },
-    )?;
+    if events.dragging_crop && view.crop_enabled && events.scroll_delta.abs() >= f32::EPSILON {
+        let options = preview_options(preview_width, view);
+        if let Some(drag) = capturer.refresh_crop_drag(image, options) {
+            apply_crop_drag(view, image.height(), drag);
+        }
+    }
+    capturer.update_preview(image, preview_options(preview_width, view))?;
     Ok(())
+}
+
+fn apply_crop_drag(view: &mut PreviewView, image_height: u32, drag: capture::PreviewCropDrag) {
+    match drag.edge {
+        PreviewCropEdge::Top => {
+            view.crop_top = drag
+                .source_y
+                .min(image_height.saturating_sub(view.crop_bottom + 1));
+        }
+        PreviewCropEdge::Bottom => {
+            let bottom_source = drag
+                .source_y
+                .max(view.crop_top.saturating_add(1))
+                .min(image_height);
+            view.crop_bottom = image_height.saturating_sub(bottom_source);
+        }
+    }
+}
+
+fn preview_options(preview_width: u32, view: &PreviewView) -> PreviewOptions {
+    PreviewOptions {
+        width: preview_width,
+        zoomed: view.zoomed,
+        source_pos: view.scrub_pos,
+        frame_len: if view.following { view.frame_len } else { 0 },
+        edge: if view.following {
+            preview_edge(view.edge)
+        } else {
+            PreviewEdge::None
+        },
+        capture_pos: view.capture_pos,
+        capture_len: view.capture_len,
+        crop_enabled: view.crop_enabled,
+        crop_top: view.crop_top,
+        crop_bottom: view.crop_bottom,
+    }
 }
 
 fn sync_crop_with_image_height(view: &mut PreviewView, image_height: u32) {
