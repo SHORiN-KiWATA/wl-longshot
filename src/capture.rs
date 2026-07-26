@@ -10,6 +10,7 @@ use wayland_client::protocol::{
     wl_buffer, wl_compositor, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm,
     wl_shm_pool, wl_surface,
 };
+use wayland_client::backend::WaylandError;
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, delegate_noop};
 use wayland_protocols::xdg::xdg_output::zv1::client::{zxdg_output_manager_v1, zxdg_output_v1};
 use wayland_protocols_wlr::layer_shell::v1::client::{zwlr_layer_shell_v1, zwlr_layer_surface_v1};
@@ -318,7 +319,9 @@ impl FrameCapturer {
         self.state.request_frame(&qh)?;
         while !self.state.frame_done {
             if should_stop() {
-                self.state.frame = None;
+                if let Some(frame) = self.state.frame.take() {
+                    frame.destroy();
+                }
                 return Ok(None);
             }
             let dispatched = self
@@ -354,12 +357,12 @@ impl FrameCapturer {
                 .is_some_and(|fd| fd.revents().intersects(PollFlags::IN | PollFlags::ERR));
             if stop_ready || should_stop() {
                 drop(guard);
-                self.state.frame = None;
+                if let Some(frame) = self.state.frame.take() {
+                    frame.destroy();
+                }
                 return Ok(None);
             }
-            guard
-                .read()
-                .map_err(|error| format!("failed to read Wayland events: {error}"))?;
+            read_events_tolerant(guard)?;
             self.event_queue
                 .dispatch_pending(&mut self.state)
                 .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
@@ -444,14 +447,25 @@ impl FrameCapturer {
                 drop(guard);
                 break;
             }
-            guard
-                .read()
-                .map_err(|error| format!("failed to read Wayland events: {error}"))?;
+            read_events_tolerant(guard)?;
         }
         self.event_queue
             .dispatch_pending(&mut self.state)
             .map_err(|error| format!("failed to dispatch Wayland events: {error}"))?;
         Ok(())
+    }
+}
+
+/// Reads events from a prepared guard, treating `WouldBlock` as "nothing to
+/// do": `read()` returns it when the socket only held internal events such as
+/// the `wl_display.delete_id` replies to our destroy requests.
+fn read_events_tolerant(
+    guard: wayland_client::backend::ReadEventsGuard,
+) -> Result<(), String> {
+    match guard.read() {
+        Ok(_) => Ok(()),
+        Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) => Err(format!("failed to read Wayland events: {error}")),
     }
 }
 
@@ -524,8 +538,14 @@ impl CaptureState {
         self.frame_done = false;
         self.frame_failed = false;
         self.frame_flags = 0;
-        self.buffer = None;
-        self.frame = None;
+        // Dropping the proxies does not destroy the server-side objects; the
+        // destructor requests must be sent explicitly or they leak per frame.
+        if let Some(buffer) = self.buffer.take() {
+            buffer.buffer.destroy();
+        }
+        if let Some(frame) = self.frame.take() {
+            frame.destroy();
+        }
 
         let manager = self
             .screencopy
@@ -695,6 +715,9 @@ impl CaptureState {
             .surface
             .damage_buffer(0, 0, width as i32, height as i32);
         overlay.surface.commit();
+        if let Some(old) = overlay.buffer.take() {
+            old.buffer.destroy();
+        }
         overlay.buffer = Some(buffer);
         Ok(())
     }
@@ -717,7 +740,9 @@ impl CaptureState {
             if let Some(preview) = self.preview.as_mut() {
                 preview.surface.attach(None, 0, 0);
                 preview.surface.commit();
-                preview.buffer = None;
+                if let Some(old) = preview.buffer.take() {
+                    old.buffer.destroy();
+                }
             }
             self.preview_interaction = None;
             return Ok(());
@@ -763,6 +788,9 @@ impl CaptureState {
             .surface
             .damage_buffer(0, 0, layout.width as i32, layout.height as i32);
         preview.surface.commit();
+        if let Some(old) = preview.buffer.take() {
+            old.buffer.destroy();
+        }
         preview.buffer = Some(buffer);
         Ok(())
     }
@@ -826,21 +854,23 @@ impl CaptureState {
             let content_height = scaled_height.min(max_content_height).max(1);
             let width = content_width + padding * 2 + PREVIEW_SCROLLBAR_GUTTER;
             let height = content_height + padding * 2;
+            // min-then-max instead of clamp: the upper bound can go negative when
+            // the preview is taller/wider than the output, and clamp would panic.
             let (x, y) = match space {
                 PreviewSpace::Right(_) => (
                     rect_right + gap,
-                    local_y.clamp(0, target_height - height as i32),
+                    local_y.min(target_height - height as i32).max(0),
                 ),
                 PreviewSpace::Left(_) => (
                     local_x - width as i32 - gap,
-                    local_y.clamp(0, target_height - height as i32),
+                    local_y.min(target_height - height as i32).max(0),
                 ),
                 PreviewSpace::Bottom(_) => (
-                    local_x.clamp(0, target_width - width as i32),
+                    local_x.min(target_width - width as i32).max(0),
                     rect_bottom + gap,
                 ),
                 PreviewSpace::Top(_) => (
-                    local_x.clamp(0, target_width - width as i32),
+                    local_x.min(target_width - width as i32).max(0),
                     local_y - height as i32 - gap,
                 ),
             };
@@ -953,18 +983,23 @@ impl CaptureState {
     }
 
     fn take_image(&mut self) -> Result<Image, String> {
+        if let Some(frame) = self.frame.take() {
+            frame.destroy();
+        }
         let buffer = self
             .buffer
             .take()
             .ok_or_else(|| "capture finished without a buffer".to_string())?;
-        decode_wl_shm_frame(
+        let image = decode_wl_shm_frame(
             &buffer.mmap,
             buffer.width,
             buffer.height,
             buffer.stride as usize,
             buffer.format,
             self.frame_flags,
-        )
+        );
+        buffer.buffer.destroy();
+        image
     }
 }
 
